@@ -1,0 +1,207 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+import {
+  mdiFormatBold,
+  mdiFormatItalic,
+  mdiFormatHeader1,
+  mdiFormatStrikethrough,
+  mdiCheckboxMarkedOutline,
+  mdiFormatListBulleted,
+  mdiFormatListNumbered,
+  mdiFormatQuoteClose,
+  mdiCodeTags,
+  mdiLinkVariant,
+  mdiTable,
+  mdiContentSave,
+  mdiChevronDown,
+  mdiCheck,
+  mdiUndo,
+  mdiRedo,
+  mdiAlertCircleOutline,
+  mdiHistory
+} from '@mdi/js'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseIcon from '@/components/ui/BaseIcon.vue'
+import type { SaveStatus } from './composables/useMarkdownSave'
+
+defineProps<{
+  editable: boolean
+  isDirty: boolean
+  isSaving: boolean
+  saveStatus: SaveStatus
+  showHistoryButton?: boolean
+  isHistoryOpen?: boolean
+}>()
+
+const emit = defineEmits<{
+  (event: 'command', command: string, payload?: unknown): void
+  (event: 'save'): void
+  (event: 'toggle-history'): void
+}>()
+
+const showHeadingDropdown = ref(false)
+
+function insertHeading(level: number) {
+  emit('command', 'WrapInHeading', level)
+  showHeadingDropdown.value = false
+}
+
+function closeDropdown(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  if (!target.closest('.heading-dropdown')) showHeadingDropdown.value = false
+}
+
+defineExpose({ closeDropdown })
+</script>
+
+<template>
+  <template v-if="editable">
+    <BaseButton color="dark" :icon="mdiUndo" xs :title="$t('notes.toolbar.undo')" name="md-undo" @mousedown.prevent @click="$emit('command', 'Undo')" />
+    <BaseButton color="dark" :icon="mdiRedo" xs :title="$t('notes.toolbar.redo')" name="md-redo" @mousedown.prevent @click="$emit('command', 'Redo')" />
+
+    <span class="md-toolbar-divider" />
+
+    <BaseButton color="dark" :icon="mdiFormatBold" xs :title="$t('notes.toolbar.bold')" name="md-bold" @mousedown.prevent @click="$emit('command', 'ToggleStrong')" />
+    <BaseButton color="dark" :icon="mdiFormatItalic" xs :title="$t('notes.toolbar.italic')" name="md-italic" @mousedown.prevent @click="$emit('command', 'ToggleEmphasis')" />
+    <BaseButton color="dark" :icon="mdiFormatStrikethrough" xs :title="$t('notes.toolbar.strikethrough')" name="md-strikethrough" @mousedown.prevent @click="$emit('command', 'ToggleStrikeThrough')" />
+
+    <span class="md-toolbar-divider" />
+
+    <div class="relative heading-dropdown">
+      <BaseButton
+        color="dark"
+        :icon="mdiFormatHeader1"
+        xs
+        :title="$t('notes.toolbar.headings')"
+        name="md-headings"
+        @mousedown.prevent
+        @click.stop="showHeadingDropdown = !showHeadingDropdown"
+      >
+        <BaseIcon :path="mdiChevronDown" :size="12" />
+      </BaseButton>
+      <div v-if="showHeadingDropdown" class="md-heading-dropdown">
+        <button
+          v-for="level in [1, 2, 3, 4, 5, 6]"
+          :key="level"
+          class="md-heading-option"
+          @mousedown.prevent
+          @click="insertHeading(level)"
+        >
+          <!-- eslint-disable-next-line @intlify/vue-i18n/no-raw-text -->
+          <span :class="['font-semibold', level <= 2 ? 'text-base' : level <= 4 ? 'text-sm' : 'text-xs']">H{{ level }}</span>
+        </button>
+      </div>
+    </div>
+
+    <span class="md-toolbar-divider" />
+
+    <BaseButton color="dark" :icon="mdiFormatListBulleted" xs :title="$t('notes.toolbar.bulletList')" name="md-bullet-list" @mousedown.prevent @click="$emit('command', 'WrapInBulletList')" />
+    <BaseButton color="dark" :icon="mdiFormatListNumbered" xs :title="$t('notes.toolbar.orderedList')" name="md-ordered-list" @mousedown.prevent @click="$emit('command', 'WrapInOrderedList')" />
+    <BaseButton color="dark" :icon="mdiCheckboxMarkedOutline" xs :title="$t('notes.toolbar.taskList')" name="md-task-list" @mousedown.prevent @click="$emit('command', 'ToggleTaskList')" />
+    <BaseButton color="dark" :icon="mdiFormatQuoteClose" xs :title="$t('notes.toolbar.blockquote')" name="md-blockquote" @mousedown.prevent @click="$emit('command', 'WrapInBlockquote')" />
+
+    <span class="md-toolbar-divider" />
+
+    <BaseButton color="dark" :icon="mdiCodeTags" xs :title="$t('notes.toolbar.codeBlock')" name="md-code-block" @mousedown.prevent @click="$emit('command', 'CreateCodeBlock')" />
+    <BaseButton color="dark" :icon="mdiLinkVariant" xs :title="$t('notes.toolbar.link')" name="md-link" @mousedown.prevent @click="$emit('command', 'ToggleLink')" />
+    <BaseButton color="dark" :icon="mdiTable" xs :title="$t('notes.toolbar.insertTable')" name="md-table" @mousedown.prevent @click="$emit('command', 'InsertTable')" />
+  </template>
+
+  <span class="flex-1" />
+
+  <!-- Save status + button (edit mode only) -->
+  <template v-if="editable">
+    <span role="status" aria-live="polite">
+      <span v-if="saveStatus === 'saving'" class="md-save-status text-brownish-300 dark:text-brownish-50">{{ $t('notes.toolbar.saving') }}</span>
+      <span v-else-if="saveStatus === 'saved'" class="md-save-status text-greeny-500 dark:text-greeny-300 flex items-center gap-1">
+        <BaseIcon :path="mdiCheck" :size="14" />
+        {{ $t('notes.toolbar.saved') }}
+      </span>
+      <span v-else-if="saveStatus === 'conflict'" class="md-save-status text-orangy-800 dark:text-orangy-400 flex items-center gap-1">
+        <BaseIcon :path="mdiAlertCircleOutline" :size="14" />
+        {{ $t('notes.toolbar.conflict') }}
+      </span>
+      <span v-else-if="saveStatus === 'error'" class="md-save-status text-redish-500 dark:text-redish-100 flex items-center gap-1">
+        <BaseIcon :path="mdiAlertCircleOutline" :size="14" />
+        {{ $t('notes.toolbar.saveFailed') }}
+      </span>
+    </span>
+
+    <BaseButton
+      color="dark"
+      :icon="mdiContentSave"
+      xs
+      :disabled="!isDirty || isSaving"
+      :title="$t('notes.toolbar.save')"
+      name="md-save"
+      @click="$emit('save')"
+    />
+
+    <BaseButton
+      v-if="showHistoryButton"
+      :color="isHistoryOpen ? 'info' : 'dark'"
+      :icon="mdiHistory"
+      xs
+      :title="$t('notes.toolbar.versionHistory')"
+      name="md-history"
+      @click="emit('toggle-history')"
+    />
+
+    <span class="md-toolbar-divider" />
+  </template>
+</template>
+
+<style scoped>
+.md-toolbar-divider {
+  width: 1px;
+  height: 1.25rem;
+  background: rgba(0, 0, 0, 0.1);
+  margin: 0 0.25rem;
+}
+
+.dark .md-toolbar-divider { background: rgba(255, 255, 255, 0.08); }
+
+.md-save-status {
+  font-size: 0.75rem;
+  margin-right: 0.5rem;
+  letter-spacing: 0.025em;
+}
+
+.md-heading-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 100px;
+  margin-top: 0.25rem;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  z-index: 50;
+}
+
+.dark .md-heading-dropdown {
+  background: #232323;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.md-heading-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  color: #4a4a4a;
+  transition: all 150ms;
+}
+
+.dark .md-heading-option { color: #b0b0b0; }
+
+.md-heading-option:hover {
+  background: rgba(238, 155, 92, 0.1);
+  color: #C76F2C;
+}
+
+.dark .md-heading-option:hover { color: #EE9B5C; }
+</style>

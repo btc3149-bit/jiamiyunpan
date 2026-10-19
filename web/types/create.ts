@@ -1,0 +1,183 @@
+import type { AppFileUnencryptedPart } from './file'
+
+export interface Rename {
+  name: string
+  search_tokens_root?: string[]
+
+  search_tokens_file?: string[]
+}
+
+export interface EncryptedRename {
+  encrypted_name: string
+  name_hash: string
+  search_tokens_root?: string[]
+
+  search_tokens_file?: string[]
+}
+
+export interface CreateFile extends AppFileUnencryptedPart {
+  /**
+   * Unencrypted file name
+   */
+  name: string
+
+  /**
+   * Mime type of the unencrypted file
+   */
+  mime: string
+
+  /**
+   * Unencrypted file thumbnail
+   */
+  thumbnail?: string
+
+  /**
+   * Size of the unencrypted file in bytes
+   */
+  size?: number
+
+  /**
+   * Number of chunks the file is split into
+   */
+  chunks?: number
+
+  /**
+   * If the file or directory is a child of another
+   * directory this is where you put its id
+   */
+  file_id?: string
+
+  /**
+   * When was the file created on disk
+   */
+  file_modified_at?: string
+
+  /**
+   * Tokenize the unencrypted file name, hash each token and load it in this array.
+   */
+  search_tokens_root?: string[]
+
+  search_tokens_file?: string[]
+
+  /**
+   * Plaintext body of a note, used only to fill `content_tokens_*` on
+   * create. Never sent to the server.
+   */
+  content?: string
+
+  /**
+   * Unencrypted file MD5 hash
+   */
+  md5?: string
+
+  /**
+   * Unencrypted file SHA1 hash
+   */
+  sha1?: string
+
+  /**
+   * Unencrypted file SHA256 hash
+   */
+  sha256?: string
+
+  /**
+   * Unencrypted file Blake2b hash
+   */
+  blake2b?: string
+
+  /**
+   * Cipher to use for encrypting this file's chunks and metadata.
+   * Defaults to `"ascon128a"` when not provided.
+   */
+  cipher?: string
+
+  /**
+   * Whether this file's content can be replaced (markdown notes).
+   * Defaults to `false` for regular uploads.
+   */
+  editable?: boolean
+}
+
+export interface EncryptedCreateFile {
+  /**
+   * JSON stringified metadata that was encrypted
+   * with the users public key
+   */
+  encrypted_metadata?: string
+
+  /**
+   * Tokenize the unencrypted file name, hash each token and load it in this array.
+   */
+  search_tokens_root?: string[]
+
+  search_tokens_file?: string[]
+
+  /**
+   * Note-body tokens. Absent on regular files; a new note sends them so
+   * the body is searchable before the first save. Written to `source=content`.
+   */
+  content_tokens_root?: string[]
+  content_tokens_file?: string[]
+
+  /**
+   * Unencrypted name hash
+   */
+  name_hash: string
+
+  /**
+   * Mime type of the unencrypted file
+   */
+  mime: string
+
+  /**
+   * Size of the unencrypted file in bytes
+   */
+  size?: number
+
+  /**
+   * Number of chunks the file is split into
+   */
+  chunks?: number
+
+  /**
+   * If the file or directory is a child of another
+   * directory this is where you put its id
+   */
+  file_id?: string
+
+  /**
+   * When was the file created on disk
+   */
+  file_modified_at?: string
+
+  /**
+   * Unencrypted file MD5 hash
+   */
+  md5?: string
+
+  /**
+   * Unencrypted file SHA1 hash
+   */
+  sha1?: string
+
+  /**
+   * Unencrypted file SHA256 hash
+   */
+  sha256?: string
+
+  /**
+   * Unencrypted file Blake2b hash
+   */
+  blake2b?: string
+
+  /**
+   * Cipher used to encrypt this file's chunks and metadata.
+   * Sent to the server so it can be recorded in the file record.
+   */
+  cipher?: string
+
+  /**
+   * Whether this file's content can be replaced (markdown notes).
+   */
+  editable?: boolean
+}

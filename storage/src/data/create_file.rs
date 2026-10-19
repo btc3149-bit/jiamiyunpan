@@ -1,0 +1,254 @@
+//! Create a file data, this is used to either initiate a new file upload,
+//! or to query the data of already started file to get all the required information
+//! required to continue the upload using the resumable upload.
+//!
+//! Encrypted key might be discarded in case the file is already started with some other key,
+//! the resume will have to continue with the returned key in that case.
+//!
+//! If not, the file will be corrupted and we have no way of knowing if that is the case.
+use ::error::{AppResult, Error};
+use chrono::Utc;
+use entity::{
+    file_tokens::{DigestTags, SearchTags},
+    files::ActiveModel as ActiveModelFile,
+    option_string_to_uuid, ActiveValue, Uuid,
+};
+use serde::{Deserialize, Serialize};
+use validr::*;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateFile {
+    /// File key encrypted with users RSA key
+    pub encrypted_key: Option<String>,
+    /// Name of the file hashed so we can guard
+    /// against duplicate files in directories
+    pub name_hash: Option<String>,
+    /// File name encrypted with the AES file key
+    pub encrypted_name: Option<String>,
+    /// File thumbnail encrypted with the AES file key
+    pub encrypted_thumbnail: Option<String>,
+    /// Name tokens, tagged under the uploader's account-wide search key.
+    /// A note's body belongs in `content_tokens_*` so a later rename cannot
+    /// wipe it.
+    pub search_tokens_root: Option<Vec<String>>,
+    /// The same name tokens tagged under the file's own key, so that sharing
+    /// this file later needs no re-index.
+    pub search_tokens_file: Option<Vec<String>>,
+    /// Note-body tokens. Absent on regular files; a new note sends them so
+    /// the body is searchable before the first save. Written to `source=content`.
+    pub content_tokens_root: Option<Vec<String>>,
+    pub content_tokens_file: Option<Vec<String>>,
+    /// Mime type of the file or "dir" for directory
+    pub mime: Option<String>,
+    /// Total size of the file
+    pub size: Option<i64>,
+    /// Total number of chunks, no limitations, frontend can decide
+    pub chunks: Option<i64>,
+    /// ID of the directory the file is located in (directories are files too)
+    pub file_id: Option<String>,
+    /// Date of the file creation from the disk, if not provided we set it to now
+    pub file_modified_at: Option<String>,
+    /// MD5 of the plaintext, keyed under the file's search key
+    pub md5: Option<String>,
+    /// SHA1 of the plaintext, keyed under the file's search key
+    pub sha1: Option<String>,
+    /// SHA256 of the plaintext, keyed under the file's search key
+    pub sha256: Option<String>,
+    /// BLAKE2B of the plaintext, keyed under the file's search key
+    pub blake2b: Option<String>,
+    /// Digest tags for clients that know the digests at create time, in the
+    /// same wire form as the word tokens. They land in the digest scopes,
+    /// which renames never touch.
+    pub digest_tokens_root: Option<Vec<String>>,
+    pub digest_tokens_file: Option<Vec<String>>,
+    /// Cipher used to encrypt file chunks and metadata.
+    /// Defaults to `"ascon128a"` when not provided (backward-compatible).
+    pub cipher: Option<String>,
+    /// Whether this file's content can be replaced (e.g. markdown notes).
+    /// Defaults to `false` for regular uploads.
+    pub editable: Option<bool>,
+}
+
+impl Validation for CreateFile {
+    fn rules(&self) -> Vec<Rule<Self>> {
+        vec![
+            rule_required!(encrypted_key),
+            rule_required!(name_hash),
+            rule_required!(encrypted_name),
+            rule_required!(mime),
+            Rule::new("size", |obj: &CreateFile, error| {
+                let dir_mime = Some("dir".to_string());
+
+                if obj.mime.as_ref() == dir_mime.as_ref() {
+                    if obj.size.is_some() {
+                        return error.add("not_for_dir");
+                    }
+
+                    return;
+                }
+
+                if let Some(v) = obj.size {
+                    if v <= 0 {
+                        error.add("min:1")
+                    }
+                } else {
+                    error.add("required")
+                }
+            }),
+            // We do this validation to make sure the frontend knows exactly
+            // how many chunks to upload. We could simply assume this is known
+            // by the frontend, but is better because the actual chunk
+            // sizes are not exactly 1MB because of the encryption overhead.
+            Rule::new("chunks", |obj: &CreateFile, error| {
+                let dir_mime = Some("dir".to_string());
+
+                if obj.mime.as_ref() == dir_mime.as_ref() {
+                    if obj.chunks.is_some() {
+                        return error.add("not_for_dir");
+                    }
+
+                    return;
+                }
+
+                if let Some(v) = obj.chunks {
+                    if v <= 0 {
+                        error.add("min:1");
+                    }
+
+                    // We won't validate the size of each chunk because we won't allow that
+                    // flexibility from the backend
+                    // let size = obj.size.unwrap_or(1);
+                    // let expected_chunks: f64 = size as f64 / crate::CHUNK_SIZE_BYTES as f64;
+                    // let mut expected_chunks_u64 = size as u64 / crate::CHUNK_SIZE_BYTES;
+
+                    // if (expected_chunks - expected_chunks_u64 as f64) > 0.0 {
+                    //     expected_chunks_u64 += 1;
+                    // }
+
+                    // if v as u64 != expected_chunks_u64 {
+                    //     error.add(
+                    //         format!("invalid_chunks_expected:{}", expected_chunks_u64).as_str(),
+                    //     )
+                    // }
+                } else {
+                    error.add("required")
+                }
+            }),
+            Rule::new("file_modified_at", |obj: &CreateFile, error| {
+                if let Some(v) = &obj.file_modified_at {
+                    if util::datetime::parse_into_naive_datetime(v, Some("file_modified_at"))
+                        .is_err()
+                    {
+                        error.add("invalid_date")
+                    }
+                }
+            }),
+        ]
+    }
+
+    fn modifiers(&self) -> Vec<Modifier<Self>> {
+        vec![]
+    }
+}
+
+pub type CreateFileData = (
+    ActiveModelFile,
+    String,
+    SearchTags,
+    SearchTags,
+    DigestTags,
+    i64,
+    Option<Uuid>,
+);
+
+impl CreateFile {
+    pub fn into_active_model(self) -> AppResult<CreateFileData> {
+        let data = self.validate()?;
+
+        // A client from before keyed search sends `sha256(name)` here. Storing
+        // it would re-introduce the exact reversible digest the keyed scheme
+        // removed, so refuse the write and tell the client to update rather
+        // than let the leak back in one file at a time.
+        if let Some(hash) = data.name_hash.as_deref() {
+            if cryptfns::search::is_legacy_name_hash(hash) {
+                return Err(Error::UpgradeRequired(
+                    "client_too_old_for_search".to_string(),
+                ));
+            }
+        }
+
+        // A bare digest in the columns is the same leak in a third place;
+        // refuse the reversible shapes. MD5 shares the tag's shape and
+        // cannot be told apart here.
+        for value in [&data.md5, &data.sha1, &data.sha256, &data.blake2b]
+            .into_iter()
+            .flatten()
+        {
+            if cryptfns::search::is_bare_digest(value) {
+                return Err(Error::UpgradeRequired(
+                    "client_too_old_for_search".to_string(),
+                ));
+            }
+        }
+
+        let now = Utc::now().naive_utc();
+
+        let chunks_stored = if data.mime != Some("dir".to_string()) {
+            Some(0)
+        } else {
+            None
+        };
+
+        let file_id = option_string_to_uuid(data.file_id.clone());
+
+        Ok((
+            ActiveModelFile {
+                id: ActiveValue::Set(entity::Uuid::new_v4()),
+                name_hash: ActiveValue::Set(data.name_hash.unwrap()),
+                encrypted_name: ActiveValue::Set(data.encrypted_name.unwrap()),
+                encrypted_thumbnail: ActiveValue::Set(data.encrypted_thumbnail),
+                mime: ActiveValue::Set(data.mime.unwrap()),
+                size: ActiveValue::Set(data.size),
+                chunks: ActiveValue::Set(data.chunks),
+                chunks_stored: ActiveValue::Set(chunks_stored),
+                file_id: ActiveValue::Set(option_string_to_uuid(data.file_id)),
+                file_modified_at: ActiveValue::Set(
+                    data.file_modified_at
+                        .map(|i| {
+                            util::datetime::parse_into_naive_datetime(&i, Some("file_modified_at"))
+                                .unwrap()
+                        })
+                        .unwrap_or(now)
+                        .and_utc()
+                        .timestamp(),
+                ),
+                md5: ActiveValue::Set(data.md5),
+                sha1: ActiveValue::Set(data.sha1),
+                sha256: ActiveValue::Set(data.sha256),
+                blake2b: ActiveValue::Set(data.blake2b),
+                cipher: ActiveValue::Set(data.cipher.unwrap_or_else(|| "ascon128a".to_string())),
+                editable: ActiveValue::Set(data.editable.unwrap_or(false)),
+                created_at: ActiveValue::Set(now.and_utc().timestamp()),
+                finished_upload_at: ActiveValue::Set(None),
+                // New files start at v1. Chunks land in `v1/` directly until
+                // the first finalize commits them; pending_version stays NULL
+                // for the initial upload (the two-phase swap kicks in only
+                // for subsequent edits, see manage::replace_content).
+                active_version: ActiveValue::Set(1),
+                pending_version: ActiveValue::Set(None),
+                pending_chunks: ActiveValue::Set(None),
+                pending_size: ActiveValue::Set(None),
+                last_membership_change_at: ActiveValue::Set(None),
+                members_list_signature: ActiveValue::Set(None),
+                members_list_signed_at: ActiveValue::Set(None),
+                members_list_signed_by_user_id: ActiveValue::Set(None),
+            },
+            data.encrypted_key.unwrap(),
+            SearchTags::new(data.search_tokens_root, data.search_tokens_file),
+            SearchTags::new(data.content_tokens_root, data.content_tokens_file),
+            DigestTags::new(data.digest_tokens_root, data.digest_tokens_file),
+            data.size.unwrap_or(0),
+            file_id,
+        ))
+    }
+}

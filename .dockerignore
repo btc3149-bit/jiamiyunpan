@@ -1,0 +1,7 @@
+.cargo
+node_modules
+data
+.env.example
+docker-compose.yml
+.turbo
+README.md

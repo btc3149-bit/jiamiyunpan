@@ -1,0 +1,1793 @@
+#[path = "./helpers.rs"]
+mod helpers;
+
+use actix_web::{
+    http::{Method, StatusCode},
+    test,
+};
+use auth::data::transfer_token::TransferTokenResponse;
+use jiamiyunpan::server;
+use storage::data::app_file::AppFile;
+
+use crate::helpers::{calculate_checksum, create_byte_chunks, CHUNK_SIZE_BYTES};
+
+#[actix_web::test]
+async fn test_creating_file_and_uploading_chunks() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "john@doe.com").await.jwt;
+    let second_jwt = helpers::register_curve25519(&app, "john2@doe.com")
+        .await
+        .jwt;
+
+    let (mut data, mut size, _) = create_byte_chunks();
+    assert_eq!(data.len(), size as usize / CHUNK_SIZE_BYTES as usize);
+
+    let mut another = vec![];
+
+    for _i in 0..(CHUNK_SIZE_BYTES / 2) {
+        another.extend(b"b");
+    }
+
+    data.push(another);
+
+    size += (CHUNK_SIZE_BYTES / 2) as i64;
+
+    let checksum = calculate_checksum(data.clone());
+
+    let random_file = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-gibberish".to_string()),
+        encrypted_name: Some("name".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&checksum)),
+        mime: Some("text/plain".to_string()),
+        size: Some(size),
+        chunks: Some(data.len() as i64),
+        file_id: None,
+        // Date of the file creation from the disk, if not provided we set it to now
+        file_modified_at: None,
+        md5: Some("asd".to_string()),
+        sha1: Some("asd".to_string()),
+        sha256: Some("asd".to_string()),
+        blake2b: Some("asd".to_string()),
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&random_file)
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    // let string_body = String::from_utf8(body.to_vec()).unwrap();
+    // println!("string_body: {}", string_body);
+
+    let mut file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    // println!("file: {:#?}", file);
+
+    let mut uploaded = vec![];
+    for (i, chunk) in data.into_iter().enumerate() {
+        println!("chunk: {}", i);
+        // println!("chunk: {}", i);
+        let checksum = cryptfns::sha256::digest(chunk.as_slice());
+        let uri = format!(
+            "/api/storage/{}?checksum={}&chunk={}",
+            &file.id, checksum, i
+        );
+
+        let req = test::TestRequest::post()
+            .uri(uri.as_str())
+            .cookie(jwt.clone())
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(chunk)
+            .to_request();
+
+        let body = test::call_and_read_body(&app, req).await;
+
+        file = match serde_json::from_slice(&body) {
+            Ok(f) => f,
+            Err(_) => {
+                let string_body = String::from_utf8(body.to_vec()).unwrap();
+                panic!(
+                    "Failed deserializing to File struct, string_body: {}",
+                    string_body
+                );
+            }
+        };
+        uploaded.push(i as i64);
+
+        assert_eq!(file.uploaded_chunks.clone().unwrap(), uploaded);
+        assert_eq!(file.chunks_stored.unwrap(), i as i64 + 1);
+    }
+
+    assert!(file.finished_upload_at.is_some());
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+
+    let contents = test::call_and_read_body(&app, req).await.to_vec();
+
+    let content_len = contents.len();
+    let file_checksum = cryptfns::sha256::digest(contents.as_slice());
+
+    // Chunks now live under `{data_dir}/{uuid}/v{version}/` instead of the
+    // legacy flat `{data_dir}/{timestamp}-{uuid}.part.{n}` layout. Use
+    // `purge_all` so this test stays correct regardless of which layout
+    // the FS provider used for this file.
+    use fs::prelude::{Fs, FsProviderContract};
+    let fs = Fs::new(&context.config);
+    fs.purge_all(&file).await.unwrap();
+
+    assert_eq!(content_len, size as usize);
+    assert_eq!(file_checksum, checksum);
+
+    // Other user cannot see the file metadata
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/metadata", &file.id).as_str())
+        .cookie(second_jwt)
+        .set_json(&random_file)
+        .to_request();
+
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Owner can see it
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/metadata", &file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&random_file)
+        .to_request();
+
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    context.config.app.cleanup();
+}
+
+#[actix_web::test]
+async fn test_transfer_token_upload_and_download() {
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-transfer".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "transfer@test.com")
+        .await
+        .jwt;
+
+    // Create a file.
+    let (data, size, _) = create_byte_chunks();
+    let checksum = calculate_checksum(data.clone());
+
+    let create_file = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("transfer-test.enc".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&checksum)),
+        mime: Some("application/octet-stream".to_string()),
+        size: Some(size),
+        chunks: Some(data.len() as i64),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create_file)
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    // ── Request an upload transfer token ──────────────────────────
+    let req = test::TestRequest::post()
+        .uri("/api/auth/transfer-token")
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "file_id": file.id.to_string(),
+            "action": "upload"
+        }))
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    let token_resp: TransferTokenResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(token_resp.action, "upload");
+    assert_eq!(token_resp.file_id, file.id);
+    let upload_token = token_resp.token;
+
+    // ── Upload chunks using the transfer token (no cookie) ───────
+    for (i, chunk) in data.iter().enumerate() {
+        let checksum = cryptfns::sha256::digest(chunk.as_slice());
+        let uri = format!(
+            "/api/storage/{}?checksum={}&chunk={}",
+            &file.id, checksum, i
+        );
+
+        let req = test::TestRequest::post()
+            .uri(uri.as_str())
+            .insert_header(("Authorization", format!("Bearer {}", upload_token)))
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(chunk.clone())
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK, "Upload chunk {} failed", i);
+    }
+
+    // ── Verify upload token cannot be used for download ──────────
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=0", &file.id).as_str())
+        .insert_header(("Authorization", format!("Bearer {}", upload_token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "Upload token should not work for download"
+    );
+
+    // ── Verify upload token cannot be used for a different file ──
+    let wrong_file_id = entity::Uuid::new_v4();
+    let req = test::TestRequest::post()
+        .uri(format!("/api/storage/{}?chunk=0", wrong_file_id).as_str())
+        .insert_header(("Authorization", format!("Bearer {}", upload_token)))
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(vec![0u8; 100])
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "Upload token should not work for a different file"
+    );
+
+    // ── Request a download transfer token ────────────────────────
+    let req = test::TestRequest::post()
+        .uri("/api/auth/transfer-token")
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "file_id": file.id.to_string(),
+            "action": "download"
+        }))
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    let token_resp: TransferTokenResponse = serde_json::from_slice(&body).unwrap();
+    let download_token = token_resp.token;
+
+    // ── Download using the transfer token (no cookie) ────────────
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=0", &file.id).as_str())
+        .insert_header(("Authorization", format!("Bearer {}", download_token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Download with transfer token failed"
+    );
+
+    // ── Update hashes using the upload transfer token ────────────
+    // Half the digest, standing in for the keyed tag a real client sends:
+    // the route refuses the bare 64-hex shape.
+    let keyed_stand_in = &checksum[..32];
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/hashes", &file.id).as_str())
+        .insert_header(("Authorization", format!("Bearer {}", upload_token)))
+        .set_json(serde_json::json!({ "sha256": keyed_stand_in }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Update hashes with upload transfer token failed"
+    );
+
+    // ── Regular cookie auth still works for upload/download ──────
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=0", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Cookie auth should still work for download"
+    );
+
+    // ── Invalid action should be rejected ────────────────────────
+    let req = test::TestRequest::post()
+        .uri("/api/auth/transfer-token")
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "file_id": file.id.to_string(),
+            "action": "delete"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Invalid action should be rejected"
+    );
+
+    context.config.app.cleanup();
+}
+
+#[actix_web::test]
+async fn test_download_tar_archive() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-tar".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "tar@test.com").await.jwt;
+
+    // Create a multi-chunk file (5 × 1 MiB + 0.5 MiB = 5.5 MiB, 6 chunks).
+    let (mut data, mut size, _) = create_byte_chunks();
+
+    let mut last_chunk = vec![];
+    for _ in 0..(CHUNK_SIZE_BYTES / 2) {
+        last_chunk.extend(b"b");
+    }
+    data.push(last_chunk);
+    size += (CHUNK_SIZE_BYTES / 2) as i64;
+
+    let checksum = calculate_checksum(data.clone());
+    let chunk_count = data.len();
+
+    let create_file = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("tar-test.enc".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&checksum)),
+        mime: Some("application/octet-stream".to_string()),
+        size: Some(size),
+        chunks: Some(chunk_count as i64),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create_file)
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    // Upload all chunks.
+    for (i, chunk) in data.iter().enumerate() {
+        let cs = cryptfns::sha256::digest(chunk.as_slice());
+        let uri = format!("/api/storage/{}?checksum={}&chunk={}", &file.id, cs, i);
+
+        let req = test::TestRequest::post()
+            .uri(uri.as_str())
+            .cookie(jwt.clone())
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(chunk.clone())
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK, "Upload chunk {} failed", i);
+    }
+
+    // Download as tar archive.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?format=tar", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify Content-Type and Content-Length headers.
+    let content_type = resp
+        .headers()
+        .get("Content-Type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/x-tar");
+
+    let content_length: u64 = resp
+        .headers()
+        .get("Content-Length")
+        .expect("Content-Length header should be present")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let tar_bytes = test::read_body(resp).await.to_vec();
+
+    // Verify Content-Length matches actual body size.
+    assert_eq!(
+        tar_bytes.len() as u64,
+        content_length,
+        "Content-Length header must match actual tar archive size"
+    );
+
+    // Extract tar entries using the transfer crate's tar parser.
+    let entries = transfer::tar::extract_tar(&tar_bytes).unwrap();
+
+    // Verify we got the right number of chunks.
+    assert_eq!(entries.len(), chunk_count);
+
+    // Verify each entry has the correct name and matches the uploaded data.
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.name,
+            format!("{:06}.enc", i),
+            "Entry {} has wrong name",
+            i
+        );
+        assert_eq!(
+            entry.data, data[i],
+            "Entry {} data does not match uploaded chunk",
+            i
+        );
+    }
+
+    // Verify the tar archive is well-formed: expected size calculation.
+    let expected_size: u64 = data
+        .iter()
+        .map(|chunk| {
+            let chunk_len = chunk.len() as u64;
+            512 + chunk_len + fs::tar::tar_padding_len(chunk_len) as u64
+        })
+        .sum::<u64>()
+        + fs::tar::TAR_END_OF_ARCHIVE_LEN as u64;
+    assert_eq!(tar_bytes.len() as u64, expected_size);
+
+    // Verify existing download modes still work.
+    // Single chunk download.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=0", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+
+    let chunk_0 = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(chunk_0, data[0]);
+
+    // Full concatenated download.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+
+    let full = test::call_and_read_body(&app, req).await.to_vec();
+    let expected_full: Vec<u8> = data.iter().flat_map(|c| c.iter().copied()).collect();
+    assert_eq!(full, expected_full);
+
+    context.config.app.cleanup();
+}
+
+/// End-to-end exercise of the versioned-chunks atomicity contract:
+/// a file is created and uploaded, then edited (replaceContent + new
+/// chunks). The active version must flip from 1 → 2, the previous
+/// version must be preserved in `file_versions`, and the download must
+/// reflect the new content.
+#[actix_web::test]
+async fn test_replace_content_atomic_edit() {
+    use entity::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-versioning".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "editor@test.com")
+        .await
+        .jwt;
+
+    // ── Create the editable file with v1 content ────────────────
+    let v1_data = vec![b"version-one-content".to_vec()];
+    let v1_size = v1_data[0].len() as i64;
+    let v1_checksum = calculate_checksum(v1_data.clone());
+
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("note.md".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&v1_checksum)),
+        mime: Some("text/markdown".to_string()),
+        size: Some(v1_size),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: Some(true),
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+    assert_eq!(file.active_version, 1);
+    assert!(file.pending_version.is_none());
+
+    // Upload the v1 chunk and finalize.
+    let req = test::TestRequest::post()
+        .uri(
+            format!(
+                "/api/storage/{}?chunk=0&checksum={}",
+                file.id,
+                cryptfns::sha256::digest(v1_data[0].as_slice())
+            )
+            .as_str(),
+        )
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(v1_data[0].clone())
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+    assert!(file.finished_upload_at.is_some());
+    assert_eq!(file.active_version, 1);
+    assert!(
+        file.pending_version.is_none(),
+        "first commit leaves no pending"
+    );
+
+    // ── Edit: replaceContent with v2 metadata ────────────────────
+    let v2_data = [b"version-two-totally-different-content!".to_vec()];
+    let v2_size = v2_data[0].len() as i64;
+
+    let replace = serde_json::json!({
+        "size": v2_size,
+        "chunks": 1,
+    });
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&replace)
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+    assert_eq!(file.active_version, 1, "active stays at v1 mid-edit");
+    assert_eq!(file.pending_version, Some(2));
+    assert_eq!(file.pending_chunks, Some(1));
+    assert_eq!(file.pending_size, Some(v2_size));
+    assert_eq!(
+        file.size,
+        Some(v1_size),
+        "size still describes the active v1"
+    );
+
+    // Download mid-edit must still serve v1 content unchanged.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let body_mid = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(
+        body_mid, v1_data[0],
+        "mid-edit reads see the previous version"
+    );
+
+    // Upload the v2 chunk → triggers auto-finalize (pointer swap).
+    let req = test::TestRequest::post()
+        .uri(
+            format!(
+                "/api/storage/{}?chunk=0&checksum={}",
+                file.id,
+                cryptfns::sha256::digest(v2_data[0].as_slice())
+            )
+            .as_str(),
+        )
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(v2_data[0].clone())
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+    assert_eq!(file.active_version, 2, "active flips to v2 after finalize");
+    assert!(
+        file.pending_version.is_none(),
+        "pending cleared after finalize"
+    );
+    assert_eq!(file.size, Some(v2_size), "size now describes v2");
+
+    // Download after edit must serve v2.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let body_after = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(body_after, v2_data[0], "post-edit reads see v2 content");
+
+    // History row for v=1 must exist.
+    let history = entity::file_versions::Entity::find()
+        .filter(entity::file_versions::Column::FileId.eq(file.id))
+        .all(&context.db)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1, "v=1 snapshotted into file_versions");
+    assert_eq!(history[0].version, 1);
+    assert_eq!(history[0].chunks, 1);
+    assert_eq!(history[0].size, v1_size);
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// A second `replaceContent` while a pending edit is still in progress
+/// must return 409 — that's the safety net against accidental concurrent
+/// edits from a second device.
+#[actix_web::test]
+async fn test_replace_content_concurrent_returns_409() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-409".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "conflict@test.com")
+        .await
+        .jwt;
+
+    let data = b"initial-content".to_vec();
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("note.md".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&cryptfns::sha256::digest(
+            data.as_slice(),
+        ))),
+        mime: Some("text/markdown".to_string()),
+        size: Some(data.len() as i64),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: Some(true),
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    let req = test::TestRequest::post()
+        .uri(
+            format!(
+                "/api/storage/{}?chunk=0&checksum={}",
+                file.id,
+                cryptfns::sha256::digest(data.as_slice())
+            )
+            .as_str(),
+        )
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(data.clone())
+        .to_request();
+    let _ = test::call_and_read_body(&app, req).await;
+
+    // First replaceContent — sets pending_version, no chunks uploaded yet.
+    let replace = serde_json::json!({ "size": 100, "chunks": 5 });
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&replace)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Second replaceContent without `force` — must 409.
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&replace)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "concurrent replaceContent without force must 409"
+    );
+
+    // Third replaceContent with `force = true` — must succeed; allocates
+    // a fresh pending_version above the abandoned one.
+    let force_replace = serde_json::json!({ "size": 200, "chunks": 3, "force": true });
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&force_replace)
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+    assert!(
+        file.pending_version.unwrap() >= 3,
+        "force-replace allocates above the abandoned pending"
+    );
+    assert_eq!(file.pending_chunks, Some(3));
+    assert_eq!(file.pending_size, Some(200));
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Three saves of an editable file → versions list shows the two
+/// historical snapshots → restoring v1 puts that content back as the
+/// active version while preserving the prior active in history → the
+/// historical row count still reflects every prior state.
+#[actix_web::test]
+async fn test_versions_list_and_restore() {
+    use entity::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-versions-restore".to_string()))
+            .await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "history@test.com")
+        .await
+        .jwt;
+
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("note.md".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: Some(vec!["aa11:1".to_string()]),
+        search_tokens_file: Some(vec!["bb22:1".to_string()]),
+        content_tokens_root: Some(vec!["cc33:1".to_string()]),
+        content_tokens_file: Some(vec!["dd44:1".to_string()]),
+        name_hash: Some("name-hash".to_string()),
+        mime: Some("text/markdown".to_string()),
+        size: Some(3),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: Some(true),
+    };
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+    let file: AppFile = serde_json::from_slice(&test::call_and_read_body(&app, req).await).unwrap();
+
+    let upload_chunk =
+        |jwt: actix_web::cookie::Cookie<'static>, fid: entity::Uuid, data: Vec<u8>| {
+            let app = &app;
+            async move {
+                let cs = cryptfns::sha256::digest(data.as_slice());
+                let req = test::TestRequest::post()
+                    .uri(format!("/api/storage/{}?chunk=0&checksum={}", fid, cs).as_str())
+                    .cookie(jwt)
+                    .append_header(("Content-Type", "application/octet-stream"))
+                    .set_payload(data)
+                    .to_request();
+                let body = test::call_and_read_body(app, req).await;
+                serde_json::from_slice::<AppFile>(&body).unwrap()
+            }
+        };
+
+    let v1_bytes = b"AAA".to_vec();
+    let v2_bytes = b"BBB".to_vec();
+    let v3_bytes = b"CCC".to_vec();
+
+    let _ = upload_chunk(jwt.clone(), file.id, v1_bytes.clone()).await;
+
+    // Edit twice — produces history rows for v1 and v2.
+    for content in [&v2_bytes, &v3_bytes] {
+        let req = test::TestRequest::put()
+            .uri(format!("/api/storage/{}/content", file.id).as_str())
+            .cookie(jwt.clone())
+            .set_json(serde_json::json!({ "size": content.len(), "chunks": 1 }))
+            .to_request();
+        let _ = test::call_and_read_body(&app, req).await;
+        let _ = upload_chunk(jwt.clone(), file.id, content.clone()).await;
+    }
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/versions", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let versions: Vec<entity::file_versions::Model> = serde_json::from_slice(&body).unwrap();
+    let history_versions: Vec<i32> = versions.iter().map(|v| v.version).collect();
+    assert_eq!(
+        history_versions,
+        vec![2, 1],
+        "history is ordered newest-first; active (v3) is not listed"
+    );
+
+    // Restore v1 — content reverts and the previously-active v3 is
+    // captured as a new history row.
+    let req = test::TestRequest::post()
+        .uri(format!("/api/storage/{}/versions/1/restore", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let restored: AppFile = serde_json::from_slice(&body).unwrap();
+    assert!(
+        restored.active_version > 3,
+        "restore allocates a fresh slot above any existing version"
+    );
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let downloaded = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(
+        downloaded, v1_bytes,
+        "restored content matches the v1 source"
+    );
+
+    let history_count = entity::file_versions::Entity::find()
+        .filter(entity::file_versions::Column::FileId.eq(file.id))
+        .all(&context.db)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(
+        history_count, 3,
+        "v1 + v2 + v3 in history; the active restored copy lives on the file row"
+    );
+
+    // The content moved, so the index that described the version it replaced
+    // has to go with it. The restore route carries no body — a restore names
+    // a version and nothing else — so no client can send tags for the text
+    // being restored, and the server holds only ciphertext. Enrolling the
+    // file is the whole repair: the sweep decrypts the restored content and
+    // rebuilds name and body from it.
+    //
+    // This assertion is the one that was missing. Version, bytes and history
+    // count all passed while the note answered searches for words it no
+    // longer contained, and with a keyed name_hash the sweep could not select
+    // it, nothing was ever going to fix that.
+    let row = entity::files::Entity::find_by_id(file.id)
+        .one(&context.db)
+        .await
+        .unwrap()
+        .expect("the restored file still exists");
+    assert_eq!(
+        row.name_hash, "",
+        "a restored file is enrolled in the owner's re-index sweep"
+    );
+
+    // The content source, and only that one. A restore swaps the bytes and
+    // leaves the name alone, so the tags describing the note's text are the
+    // ones that now describe a version this file no longer has — while the
+    // name tags are still exactly right. Clearing everything would drop a
+    // working index; clearing the name source, which is what `reindex` does
+    // now that tags carry a source, would drop the right one and keep the
+    // wrong one.
+    let tags = entity::file_tokens::Entity::find()
+        .filter(entity::file_tokens::Column::FileId.eq(file.id))
+        .all(&context.db)
+        .await
+        .unwrap();
+
+    let content = i32::from(entity::file_tokens::Source::Content);
+    let name = i32::from(entity::file_tokens::Source::Name);
+    assert!(
+        tags.iter().all(|t| t.source != content),
+        "tags describing the replaced version must not answer for the restored one, got {:?}",
+        tags
+    );
+    assert!(
+        tags.iter().any(|t| t.source == name),
+        "the name did not change, so its tags must survive, got {:?}",
+        tags
+    );
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&restored).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Forking a historical version creates a new file whose content
+/// matches that snapshot byte-for-byte. The original file's active
+/// version stays untouched.
+#[actix_web::test]
+async fn test_fork_creates_independent_copy() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-fork".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "fork@test.com")
+        .await
+        .jwt;
+
+    // Source: a 1-chunk editable file with v1 content, then edited to v2.
+    let v1_bytes = b"original-snapshot".to_vec();
+    let v2_bytes = b"current-content---".to_vec();
+
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("source-key".to_string()),
+        encrypted_name: Some("source.md".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some("source-hash".to_string()),
+        mime: Some("text/markdown".to_string()),
+        size: Some(v1_bytes.len() as i64),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: Some(true),
+    };
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+    let source: AppFile =
+        serde_json::from_slice(&test::call_and_read_body(&app, req).await).unwrap();
+
+    let req = test::TestRequest::post()
+        .uri(
+            format!(
+                "/api/storage/{}?chunk=0&checksum={}",
+                source.id,
+                cryptfns::sha256::digest(v1_bytes.as_slice())
+            )
+            .as_str(),
+        )
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(v1_bytes.clone())
+        .to_request();
+    let _ = test::call_and_read_body(&app, req).await;
+
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", source.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({ "size": v2_bytes.len(), "chunks": 1 }))
+        .to_request();
+    let _ = test::call_and_read_body(&app, req).await;
+
+    let req = test::TestRequest::post()
+        .uri(
+            format!(
+                "/api/storage/{}?chunk=0&checksum={}",
+                source.id,
+                cryptfns::sha256::digest(v2_bytes.as_slice())
+            )
+            .as_str(),
+        )
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(v2_bytes.clone())
+        .to_request();
+    let _ = test::call_and_read_body(&app, req).await;
+
+    // Fork v1 into a new note. The chunks/size in the body are ignored
+    // — server takes them from the source version's recorded values.
+    let new_note = serde_json::json!({
+        "encrypted_key": "fork-key",
+        "encrypted_name": "source (restored).md",
+        "name_hash": "fork-hash",
+        "mime": "text/markdown",
+        "size": 999,
+        "chunks": 999,
+        "editable": true,
+        // The copy's index, which only the client can compute. This is the
+        // one moment it can be written: nothing revisits a forked note, and
+        // its keyed name_hash keeps it off the re-index sweep.
+        "search_tokens_root": ["a1b2c3d4e5f60718293a4b5c6d7e8f90:1"],
+        "search_tokens_file": ["0f1e2d3c4b5a69788796a5b4c3d2e1f0:1"],
+    });
+    let req = test::TestRequest::post()
+        .uri(format!("/api/storage/{}/versions/1/fork", source.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(&new_note)
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let forked: AppFile = serde_json::from_slice(&body).unwrap();
+    assert_ne!(forked.id, source.id);
+    assert_eq!(
+        forked.size,
+        Some(v1_bytes.len() as i64),
+        "fork uses source v1 size"
+    );
+    assert_eq!(forked.active_version, 1);
+    assert!(forked.finished_upload_at.is_some());
+
+    // A copy nothing can find is a copy the user has lost. The tags the
+    // client sent are written with the row, the way create writes them.
+    let req = test::TestRequest::post()
+        .uri("/api/storage/search")
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "root_tags": ["a1b2c3d4e5f60718293a4b5c6d7e8f90"]
+        }))
+        .to_request();
+    let hits: Vec<AppFile> =
+        serde_json::from_slice(&test::call_and_read_body(&app, req).await).unwrap();
+    assert!(
+        hits.iter().any(|f| f.id == forked.id),
+        "the forked note must be findable by the tags it was created with"
+    );
+
+    // Forked file's content matches v1, source still serves v2.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", forked.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let forked_content = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(forked_content, v1_bytes);
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}", source.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let source_content = test::call_and_read_body(&app, req).await.to_vec();
+    assert_eq!(source_content, v2_bytes, "source untouched by fork");
+
+    use fs::prelude::{Fs, FsProviderContract};
+    let fs = Fs::new(&context.config);
+    fs.purge_all(&source).await.unwrap();
+    fs.purge_all(&forked).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// `chunks` is a count, so the only valid indices are `0..chunks`. Accepting
+/// `chunks` itself lets a client that numbers from one reach the finalize
+/// threshold with index 0 never written, stamping `finished_upload_at` on a
+/// file with a hole in it.
+#[actix_web::test]
+async fn test_upload_rejects_out_of_range_chunk_index() {
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-chunk-range".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+    let jwt = helpers::register_curve25519(&app, "range@test.com")
+        .await
+        .jwt;
+
+    let file = create_three_chunk_file(&app, &jwt, "range-test.enc").await;
+
+    for index in ["3", "-1"] {
+        let payload = b"x".to_vec();
+        let uri = format!(
+            "/api/storage/{}?checksum={}&chunk={}",
+            &file.id,
+            cryptfns::sha256::digest(payload.as_slice()),
+            index
+        );
+
+        let req = test::TestRequest::post()
+            .uri(uri.as_str())
+            .cookie(jwt.clone())
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "chunk index {index} must be rejected for a 3-chunk file"
+        );
+    }
+
+    context.config.app.cleanup();
+}
+
+/// A client numbering its chunks from one writes 1, 2, 3 for a 3-chunk file.
+/// Every one of those has to be judged against the valid range, and the file
+/// must stay unfinished.
+#[actix_web::test]
+async fn test_upload_one_based_indices_do_not_finish_file() {
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-chunk-hole".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+    let jwt = helpers::register_curve25519(&app, "hole@test.com")
+        .await
+        .jwt;
+
+    let file = create_three_chunk_file(&app, &jwt, "hole-test.enc").await;
+
+    for index in 1..=3 {
+        let payload = format!("chunk-{index}").into_bytes();
+        let uri = format!(
+            "/api/storage/{}?checksum={}&chunk={}",
+            &file.id,
+            cryptfns::sha256::digest(payload.as_slice()),
+            index
+        );
+
+        let req = test::TestRequest::post()
+            .uri(uri.as_str())
+            .cookie(jwt.clone())
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(payload)
+            .to_request();
+
+        test::call_service(&app, req).await;
+    }
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/metadata", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    assert!(
+        file.finished_upload_at.is_none(),
+        "file with chunk 0 missing must not be finalized"
+    );
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// The download route builds its response with `streaming`, which commits the
+/// 200 before a single byte is read. A chunk that was never written therefore
+/// used to come back as an empty or provider-error body under a success status,
+/// which the client fed to the cipher.
+#[actix_web::test]
+async fn test_download_missing_chunk_returns_404() {
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-missing-chunk".to_string())).await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+    let jwt = helpers::register_curve25519(&app, "missing@test.com")
+        .await
+        .jwt;
+
+    let file = create_three_chunk_file(&app, &jwt, "missing-test.enc").await;
+
+    let payload = b"chunk-zero".to_vec();
+    let uri = format!(
+        "/api/storage/{}?checksum={}&chunk=0",
+        &file.id,
+        cryptfns::sha256::digest(payload.as_slice())
+    );
+    let req = test::TestRequest::post()
+        .uri(uri.as_str())
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(payload)
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=1", &file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let body = test::read_body(resp).await;
+    assert!(
+        !body.starts_with(b"<?xml"),
+        "404 body must not be a storage-provider error document: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // HEAD has to agree with the GET above — a 200 here would advertise a
+    // chunk that cannot be fetched.
+    let req = test::TestRequest::with_uri(format!("/api/storage/{}?chunk=1", &file.id).as_str())
+        .method(Method::HEAD)
+        .cookie(jwt.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let req = test::TestRequest::with_uri(format!("/api/storage/{}?chunk=0", &file.id).as_str())
+        .method(Method::HEAD)
+        .cookie(jwt.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::OK,
+        "the chunk that was uploaded still HEADs 200"
+    );
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Editable files read through the versioned layout, a separate branch from
+/// the one above — and `GET /versions/{v}` streams through it too. A chunk
+/// that was never written must 404 on every one of those surfaces.
+#[actix_web::test]
+async fn test_versioned_download_missing_chunk_returns_404() {
+    let context = context::Context::mock_with_data_dir(Some(
+        "../data/test-missing-chunk-versioned".to_string(),
+    ))
+    .await;
+
+    let app = test::init_service(server::app(context.clone())).await;
+    let jwt = helpers::register_curve25519(&app, "missing-v@test.com")
+        .await
+        .jwt;
+
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some("note.md".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag("versioned-gap")),
+        mime: Some("text/markdown".to_string()),
+        size: Some(3),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: Some(true),
+    };
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+    let file: AppFile = serde_json::from_slice(&test::call_and_read_body(&app, req).await).unwrap();
+
+    let upload = |data: Vec<u8>| {
+        let app = &app;
+        let jwt = jwt.clone();
+        let file_id = file.id;
+        async move {
+            let req = test::TestRequest::post()
+                .uri(
+                    format!(
+                        "/api/storage/{}?chunk=0&checksum={}",
+                        file_id,
+                        cryptfns::sha256::digest(data.as_slice())
+                    )
+                    .as_str(),
+                )
+                .cookie(jwt)
+                .append_header(("Content-Type", "application/octet-stream"))
+                .set_payload(data)
+                .to_request();
+            serde_json::from_slice::<AppFile>(&test::call_and_read_body(app, req).await).unwrap()
+        }
+    };
+
+    // v1 lands and finalizes, then one edit moves the active pointer to v2
+    // and snapshots v1 into history. Both versions hold exactly one chunk.
+    let file = upload(b"AAA".to_vec()).await;
+    assert_eq!(file.active_version, 1);
+
+    let req = test::TestRequest::put()
+        .uri(format!("/api/storage/{}/content", file.id).as_str())
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({ "size": 3, "chunks": 1 }))
+        .to_request();
+    let _ = test::call_and_read_body(&app, req).await;
+
+    let file = upload(b"BBB".to_vec()).await;
+    assert_eq!(file.active_version, 2, "edit finalized into v2");
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}?chunk=1", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "active version has one chunk; index 1 is a hole"
+    );
+    let body = test::read_body(resp).await;
+    assert!(
+        !body.starts_with(b"<?xml"),
+        "404 body must not be a storage-provider error document: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let req = test::TestRequest::with_uri(format!("/api/storage/{}?chunk=1", file.id).as_str())
+        .method(Method::HEAD)
+        .cookie(jwt.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/versions/1?chunk=1", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "history route must not stream a hole either"
+    );
+    let body = test::read_body(resp).await;
+    assert!(
+        !body.starts_with(b"<?xml"),
+        "404 body must not be a storage-provider error document: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // The probe must not reject chunks that are actually there.
+    let req = test::TestRequest::get()
+        .uri(format!("/api/storage/{}/versions/1?chunk=0", file.id).as_str())
+        .cookie(jwt.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(test::read_body(resp).await, b"AAA".as_ref());
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Three declared chunks, none uploaded. Payloads stay tiny — these tests are
+/// about index bookkeeping, not transfer volume.
+async fn create_three_chunk_file(
+    app: &impl helpers::TestApp,
+    jwt: &actix_web::cookie::Cookie<'static>,
+    name: &str,
+) -> AppFile {
+    let create_file = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-key".to_string()),
+        encrypted_name: Some(name.to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(name)),
+        mime: Some("application/octet-stream".to_string()),
+        size: Some(30),
+        chunks: Some(3),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create_file)
+        .to_request();
+
+    serde_json::from_slice(&test::call_and_read_body(app, req).await).unwrap()
+}
+
+/// `GET /api/storage/reindex` must reach its own handler, not the catch-all
+/// `GET /api/storage/{file_id}` download route.
+///
+/// actix-web walks services in registration order, so the download route
+/// happily matches this path with `file_id = "reindex"` and dies on the UUID
+/// parse. That shipped once and silently disabled the whole re-index sweep:
+/// the client asks what is pending, gets an error object instead of a list,
+/// and concludes there is nothing to do.
+#[actix_web::test]
+async fn test_reindex_pending_route_is_not_swallowed_by_the_download_route() {
+    let context = context::Context::mock_sqlite().await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "reindex@test.com")
+        .await
+        .jwt;
+
+    let req = test::TestRequest::get()
+        .uri("/api/storage/reindex")
+        .cookie(jwt)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("reindex response is json");
+
+    assert!(
+        body.is_array(),
+        "expected a list of pending files, got {body}"
+    );
+
+    let _ = context;
+}
+
+/// The download route's file lookup is memoized. The cache entry the owner
+/// warms must never be served to anyone else — this exact sequence used to
+/// stream the owner's ciphertext to a second logged-in user.
+#[actix_web::test]
+async fn test_download_refuses_a_stranger_after_the_owner_warmed_the_cache() {
+    // Its own data directory: this test cleans up after itself, and the
+    // suite's tests run concurrently, so sharing one would delete another
+    // test's chunks out from under it mid-upload.
+    let context =
+        context::Context::mock_with_data_dir(Some("../data/test-cache-idor".to_string())).await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let owner = helpers::register_curve25519(&app, "cache-owner@doe.com")
+        .await
+        .jwt;
+    let stranger = helpers::register_curve25519(&app, "cache-stranger@doe.com")
+        .await
+        .jwt;
+
+    let (data, size, _) = create_byte_chunks();
+    let checksum = calculate_checksum(data.clone());
+
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-gibberish".to_string()),
+        encrypted_name: Some("name".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(&checksum)),
+        mime: Some("text/plain".to_string()),
+        size: Some(size),
+        chunks: Some(data.len() as i64),
+        file_id: None,
+        file_modified_at: None,
+        md5: Some("asd".to_string()),
+        sha1: Some("asd".to_string()),
+        sha256: Some("asd".to_string()),
+        blake2b: Some("asd".to_string()),
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(owner.clone())
+        .set_json(&create)
+        .to_request();
+    let body = test::call_and_read_body(&app, req).await;
+    let mut file: AppFile = serde_json::from_slice(&body).unwrap();
+
+    for (i, chunk) in data.into_iter().enumerate() {
+        let checksum = cryptfns::sha256::digest(chunk.as_slice());
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/api/storage/{}?checksum={}&chunk={}",
+                &file.id, checksum, i
+            ))
+            .cookie(owner.clone())
+            .append_header(("Content-Type", "application/octet-stream"))
+            .set_payload(chunk)
+            .to_request();
+        let body = test::call_and_read_body(&app, req).await;
+        file = serde_json::from_slice(&body).unwrap();
+    }
+
+    // The owner's own download works and warms the lookup cache.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/storage/{}", &file.id))
+        .cookie(owner.clone())
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A user with no grant on the file gets the same 404 they would have
+    // gotten with a cold cache, from both the GET and its HEAD twin.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/storage/{}", &file.id))
+        .cookie(stranger.clone())
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let req = test::TestRequest::default()
+        .method(actix_web::http::Method::HEAD)
+        .uri(&format!("/api/storage/{}", &file.id))
+        .cookie(stranger)
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    context.config.app.cleanup();
+}
+
+/// Create a file record without uploading content, for reindex-route tests.
+async fn reindex_fixture_file(
+    app: &impl helpers::TestApp,
+    jwt: &actix_web::cookie::Cookie<'static>,
+    name: &str,
+) -> AppFile {
+    let create = storage::data::create_file::CreateFile {
+        encrypted_key: Some("encrypted-gibberish".to_string()),
+        encrypted_name: Some(name.to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(name)),
+        mime: Some("text/plain".to_string()),
+        size: Some(16),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: Some("asd".to_string()),
+        sha1: Some("asd".to_string()),
+        sha256: Some("asd".to_string()),
+        blake2b: Some("asd".to_string()),
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create)
+        .to_request();
+    let body = test::call_and_read_body(app, req).await;
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Blank a file's `name_hash` the way the re-key migration does, which is
+/// what marks it as waiting for the owner's sweep.
+async fn blank_name_hash(context: &context::Context, file_id: entity::Uuid) {
+    use entity::{ColumnTrait, EntityTrait, QueryFilter};
+    entity::files::Entity::update_many()
+        .col_expr(entity::files::Column::NameHash, entity::Expr::value(""))
+        .filter(entity::files::Column::Id.eq(file_id))
+        .exec(&context.db)
+        .await
+        .unwrap();
+}
+
+async fn fingerprint_of(context: &context::Context, user_id: entity::Uuid) -> String {
+    use entity::EntityTrait;
+    entity::users::Entity::find_by_id(user_id)
+        .one(&context.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .fingerprint
+}
+
+async fn pending_ids(
+    app: &impl helpers::TestApp,
+    jwt: &actix_web::cookie::Cookie<'static>,
+) -> Vec<String> {
+    let req = test::TestRequest::get()
+        .uri("/api/storage/reindex")
+        .cookie(jwt.clone())
+        .to_request();
+    let body = test::call_and_read_body(app, req).await;
+    let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    rows.as_array()
+        .expect("pending list is an array")
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A successful re-index takes the file off the pending list even when it
+/// writes zero tags — the keyed `name_hash` is the record, and a file whose
+/// name tokenizes to nothing must not come back on every fetch while the
+/// client sweeps until the list drains.
+#[actix_web::test]
+async fn test_reindex_put_clears_the_pending_marker_with_zero_tags() {
+    let context = context::Context::mock_sqlite().await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let registered = helpers::register_curve25519(&app, "reindex-put@test.com").await;
+    let jwt = registered.jwt;
+    let file = reindex_fixture_file(&app, &jwt, "reindex-me").await;
+
+    blank_name_hash(&context, file.id).await;
+    assert!(pending_ids(&app, &jwt).await.contains(&file.id.to_string()));
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/storage/{}/reindex", file.id))
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "name_hash": helpers::name_tag("reindex-me"),
+            "fingerprint": fingerprint_of(&context, registered.user_id).await,
+            "search_tokens_root": [],
+            "search_tokens_file": [],
+        }))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(!pending_ids(&app, &jwt).await.contains(&file.id.to_string()));
+}
+
+/// A leftover session still holding the previous private key must not be
+/// able to retire a file from the sweep after a key rotation has committed.
+#[actix_web::test]
+async fn test_reindex_put_refuses_a_stale_key_epoch() {
+    let context = context::Context::mock_sqlite().await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let registered = helpers::register_curve25519(&app, "reindex-stale@test.com").await;
+    let jwt = registered.jwt;
+    let file = reindex_fixture_file(&app, &jwt, "stale-key").await;
+
+    blank_name_hash(&context, file.id).await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/storage/{}/reindex", file.id))
+        .cookie(jwt.clone())
+        .set_json(serde_json::json!({
+            "name_hash": helpers::name_tag("stale-key"),
+            "fingerprint": "0".repeat(64),
+            "search_tokens_root": [],
+            "search_tokens_file": [],
+        }))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8_lossy(&test::read_body(response).await).into_owned();
+    assert!(
+        body.contains("reindex_key_rotated"),
+        "got: {body}"
+    );
+    assert!(pending_ids(&app, &jwt).await.contains(&file.id.to_string()));
+}
+
+/// A stranger gets the same not-found the metadata routes give — the reindex
+/// write must not become a way to probe for file ids.
+#[actix_web::test]
+async fn test_reindex_put_is_hidden_from_a_stranger() {
+    let context = context::Context::mock_sqlite().await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let owner = helpers::register_curve25519(&app, "reindex-owner@test.com")
+        .await
+        .jwt;
+    let stranger = helpers::register_curve25519(&app, "reindex-stranger@test.com")
+        .await
+        .jwt;
+    let file = reindex_fixture_file(&app, &owner, "not-yours").await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/storage/{}/reindex", file.id))
+        .cookie(stranger)
+        .set_json(serde_json::json!({
+            "name_hash": helpers::name_tag("not-yours"),
+            "fingerprint": "not-the-owner",
+            "search_tokens_root": [],
+            "search_tokens_file": [],
+        }))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let _ = context;
+}
+
+/// The route built to replace the reversible digest refuses one back, the
+/// same way create, rename and fork do.
+#[actix_web::test]
+async fn test_reindex_put_refuses_a_legacy_digest() {
+    let context = context::Context::mock_sqlite().await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let jwt = helpers::register_curve25519(&app, "reindex-legacy@test.com")
+        .await
+        .jwt;
+    let file = reindex_fixture_file(&app, &jwt, "legacy-digest").await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/storage/{}/reindex", file.id))
+        .cookie(jwt)
+        .set_json(serde_json::json!({
+            "name_hash": cryptfns::sha256::digest("legacy-digest".as_bytes()),
+            "fingerprint": "fp",
+            "search_tokens_root": [],
+            "search_tokens_file": [],
+        }))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let _ = context;
+}

@@ -1,0 +1,273 @@
+name: Test
+
+on:
+  pull_request:
+    branches:
+      - master
+  # Weekly run on master so the remote-provider job keeps being exercised:
+  # pull-request runs cover it only from same-repo branches, and nothing
+  # else would ever run it after a merge.
+  schedule:
+    - cron: "0 5 * * 1"
+
+# A superseded run has no audience — kill it the moment a newer push
+# arrives instead of letting two full pipelines queue behind each other.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - uses: extractions/setup-just@v2
+      - name: Clippy
+        run: just clippy
+
+  rust-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        # The workspace's debug target/ plus the restored rust-cache overran
+        # the runner's ~14 GB before the job split; the SDK purge stays as
+        # cheap insurance (Android alone is ~9 GB).
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-unit
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - uses: extractions/setup-just@v2
+      - name: Rust unit tests
+        run: just test-rust-unit
+
+  rust-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-integration-${{ matrix.shard }}
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - name: Integration tests (shard ${{ matrix.shard }})
+        # Every file under server/tests/ is a test target; round-robin them
+        # across the shards by index. Deriving the list from the directory
+        # means a newly added suite always runs — there is no hand-kept list
+        # to forget to update. Helper modules compile to zero-test targets,
+        # which is exactly what clippy already proves they can do.
+        run: |
+          args=""
+          i=0
+          for suite in $(ls server/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort); do
+            if [ $((i % 3)) -eq ${{ matrix.shard }} ]; then
+              args="$args --test $suite"
+            fi
+            i=$((i + 1))
+          done
+          echo "Running:$args"
+          cargo test $args -- --nocapture
+
+  # SQLite and PostgreSQL are not interchangeable — different types, different
+  # transaction semantics, and a GROUP BY that PG rejects and SQLite waves
+  # through. Every other suite here runs on SQLite, so without this the
+  # PostgreSQL half of the supported matrix ships on the strength of a local
+  # `just ci-test-pg` someone remembered to run.
+  rust-integration-pg:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: jiamiyunpan_test
+          POSTGRES_PASSWORD: jiamiyunpan_test
+          POSTGRES_DB: jiamiyunpan_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U jiamiyunpan_test"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://jiamiyunpan_test:jiamiyunpan_test@localhost:5433/jiamiyunpan_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-integration-pg
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - uses: extractions/setup-just@v2
+      # The service container above is what `just test-pg-up` starts locally,
+      # so the recipe's own docker step is skipped and the suites run against
+      # it directly.
+      - name: Integration tests against PostgreSQL
+        run: just test-rust-integration
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned via .nvmrc — transfer WASM uses externref / reference-types
+          # which older Node WebAssembly engines reject at parse time.
+          node-version-file: '.nvmrc'
+          cache: yarn
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-wasm
+      - uses: extractions/setup-just@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install yarn and dependencies
+        run: npm install -g yarn && yarn install
+      - name: Build WASM crates
+        run: just wasm
+      - name: Frontend unit tests
+        run: just test-web
+      - name: Build web
+        run: just build-web
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: yarn
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The release server build lives only in this job's cache line, so
+          # a warm run pays Playwright, not a full optimized recompile.
+          shared-key: e2e-release
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - uses: extractions/setup-just@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install yarn and dependencies
+        run: npm install -g yarn && yarn install
+      - name: Install Playwright browsers
+        run: cd web && npx playwright install --with-deps chromium
+      - name: E2E tests
+        run: just e2e
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 14
+
+  # Branch protection requires a single check named "test". This gate is
+  # that name: it succeeds only when every job above did, so the required
+  # check stays stable no matter how the jobs behind it are re-arranged.
+  # e2e-direct lives in its own workflow (e2e-direct.yml) and runs on master
+  # pushes, not on pull requests, so it is not part of this gate.
+  # Only s3-r2-integration may be skipped — it skips itself on forked PRs,
+  # where the bucket credentials are unavailable, and an outside contributor
+  # must not be blocked by a job they cannot run. Every other job skipping is a
+  # pipeline bug, and a gate that waved skips through would let a
+  # misconfigured trigger merge untested code.
+  test:
+    runs-on: ubuntu-latest
+    needs: [lint, rust-unit, rust-integration, rust-integration-pg, web, e2e, s3-r2-integration]
+    if: always()
+    steps:
+      - name: Verify all jobs passed
+        run: |
+          fail() { echo "$1 finished as '$2'"; exit 1; }
+          for job in lint rust-unit rust-integration rust-integration-pg web e2e; do
+            case "$job" in
+              lint) result="${{ needs.lint.result }}";;
+              rust-unit) result="${{ needs.rust-unit.result }}";;
+              rust-integration) result="${{ needs.rust-integration.result }}";;
+              rust-integration-pg) result="${{ needs.rust-integration-pg.result }}";;
+              web) result="${{ needs.web.result }}";;
+              e2e) result="${{ needs.e2e.result }}";;
+            esac
+            [ "$result" = "success" ] || fail "$job" "$result"
+          done
+          remote="${{ needs.s3-r2-integration.result }}"
+          case "$remote" in
+            success|skipped) ;;
+            *) fail s3-r2-integration "$remote";;
+          esac
+
+  # MinIO covers the S3 API in e2e-direct. This job is the one that answers to
+  # a service nobody here controls, where SigV4 signing, TLS, CopyObject and
+  # the multi-key DeleteObjects POST have to hold against someone else's
+  # implementation of them. R2 is what our own deployments run on, and it
+  # bills nothing per request, so the weekly cadence above is free.
+  s3-r2-integration:
+    runs-on: ubuntu-latest
+    # GitHub secrets aren't available to forked-PR workflows — skip cleanly
+    # instead of failing so external contributors' PRs aren't blocked. The
+    # weekly schedule always runs it; that is the run that keeps the remote
+    # provider honest between same-repo PRs.
+    if: github.event_name == 'schedule' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      S3_ENDPOINT: ${{ secrets.R2_TEST_ENDPOINT }}
+      S3_REGION: ${{ secrets.R2_TEST_REGION }}
+      S3_BUCKET: ${{ secrets.R2_TEST_BUCKET }}
+      S3_ACCESS_KEY: ${{ secrets.R2_TEST_ACCESS_KEY }}
+      S3_SECRET_KEY: ${{ secrets.R2_TEST_SECRET_KEY }}
+      # R2 serves virtual-hosted style too, but path style is what the
+      # deployment docs and the dogfood rig use, so it is what gets tested.
+      S3_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
+          version: 1.0
+      - name: Run S3 versioned integration tests against R2
+        run: cargo test -p fs --features s3-integration-tests providers::s3::s3_versioned_tests -- --nocapture

@@ -1,0 +1,157 @@
+<script lang="ts" setup>
+import CardBox from '@/components/ui/CardBox.vue'
+import UniversalCheckbox from '@/components/ui/UniversalCheckbox.vue'
+import BaseIcon from '@/components/ui/BaseIcon.vue'
+import type { Data } from 'types/admin/settings'
+import ListInput from '@/components/ui/ListInput.vue'
+import { computed } from 'vue'
+import QuotaSlider from '@/components/ui/QuotaSlider.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import { mdiContentSave, mdiAccountPlus, mdiEmailSearch, mdiDatabase, mdiShareVariantOutline } from '@mdi/js'
+
+const props = defineProps<{
+  modelValue?: Data
+  loading: boolean
+  error?: string
+  class?: string
+}>()
+
+const emits = defineEmits(['update:modelValue', 'save'])
+
+const data = computed({
+  get() { return props.modelValue },
+  set(value) { emits('update:modelValue', value) }
+})
+</script>
+<template>
+  <CardBox :class="props.class" v-if="data">
+    <div class="-mx-4 -mt-4 px-6 py-5 border-b border-paper-200 dark:border-brownish-700/50 rounded-t-2xl">
+      <div class="flex items-center gap-2">
+        <BaseIcon :path="mdiAccountPlus" :size="14" class="text-brownish-400 dark:text-brownish-50" />
+        <p class="text-xs font-semibold text-brownish-400 dark:text-brownish-50">{{ $t('admin.settings.registration') }}</p>
+      </div>
+
+      <div class="mt-4 space-y-3">
+        <div class="p-3 rounded-xl bg-paper-200 dark:bg-brownish-700/20 border border-paper-200/50 dark:border-brownish-700/30">
+          <UniversalCheckbox
+            :label="$t('admin.settings.requireEmailVerification')"
+            name="enforce_email_activation"
+            v-model="data.users.enforce_email_activation"
+            :disabled="loading"
+          />
+          <p class="text-xs text-brownish-400 dark:text-brownish-50 pl-7 leading-relaxed mt-1">
+            {{ $t('admin.settings.requireEmailVerificationHint') }}
+          </p>
+        </div>
+
+        <div class="p-3 rounded-xl bg-paper-200 dark:bg-brownish-700/20 border border-paper-200/50 dark:border-brownish-700/30">
+          <UniversalCheckbox
+            :label="$t('admin.settings.allowRegistration')"
+            name="allow_register"
+            v-model="data.users.allow_register"
+            :disabled="loading"
+          />
+          <p class="text-xs text-brownish-400 dark:text-brownish-50 pl-7 leading-relaxed mt-1">
+            {{ $t('admin.settings.allowRegistrationHint') }}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="-mx-4 px-6 py-5 border-b border-paper-200 dark:border-brownish-700/50">
+      <div class="flex items-center gap-2 mb-4">
+        <BaseIcon :path="mdiEmailSearch" :size="14" class="text-brownish-400 dark:text-brownish-50" />
+        <p class="text-xs font-semibold text-brownish-400 dark:text-brownish-50">{{ $t('admin.settings.emailFilters') }}</p>
+      </div>
+
+      <div class="space-y-4">
+        <div class="space-y-2">
+          <ListInput v-model="data.users.email_whitelist" :label="$t('admin.settings.whitelist')" :disabled="loading" />
+          <i18n-t keypath="admin.settings.whitelistHint" tag="p" class="text-xs text-brownish-400 dark:text-brownish-50 leading-relaxed">
+            <!-- eslint-disable-next-line @intlify/vue-i18n/no-raw-text -->
+            <template #exampleDomain><code class="font-mono bg-paper-100 dark:bg-brownish-700 px-1 rounded">*@company.com</code></template>
+            <!-- eslint-disable-next-line @intlify/vue-i18n/no-raw-text -->
+            <template #exampleAny><code class="font-mono bg-paper-100 dark:bg-brownish-700 px-1 rounded">*@company.*</code></template>
+          </i18n-t>
+        </div>
+
+        <div class="space-y-2">
+          <ListInput v-model="data.users.email_blacklist" :label="$t('admin.settings.blacklist')" :disabled="loading" />
+          <p class="text-xs text-brownish-400 dark:text-brownish-50 leading-relaxed">
+            {{ $t('admin.settings.blacklistHint') }}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="-mx-4 px-6 py-5 border-b border-paper-200 dark:border-brownish-700/50">
+      <div class="flex items-center gap-2 mb-3">
+        <BaseIcon :path="mdiShareVariantOutline" :size="14" class="text-brownish-400 dark:text-brownish-50" />
+        <p class="text-xs font-semibold text-brownish-400 dark:text-brownish-50">{{ $t('admin.settings.sharing') }}</p>
+      </div>
+
+      <div class="space-y-3">
+        <div class="p-3 rounded-xl bg-paper-200 dark:bg-brownish-700/20 border border-paper-200/50 dark:border-brownish-700/30">
+          <UniversalCheckbox
+            :label="$t('admin.settings.accountSharing')"
+            name="sharing_enabled"
+            v-model="data.sharing.enabled"
+            :disabled="loading"
+            data-testid="admin-sharing-enabled-toggle"
+          />
+          <i18n-t keypath="admin.settings.sharingHint" tag="p" class="text-xs text-brownish-400 dark:text-brownish-50 pl-7 leading-relaxed mt-1">
+            <!-- eslint-disable-next-line @intlify/vue-i18n/no-raw-text -->
+            <template #endpoint><code class="font-mono bg-paper-100 dark:bg-brownish-700 px-1 rounded">/api/shares/*</code></template>
+          </i18n-t>
+        </div>
+
+        <div class="p-3 rounded-xl bg-paper-200 dark:bg-brownish-700/20 border border-paper-200/50 dark:border-brownish-700/30">
+          <label class="block text-xs font-medium mb-1 text-brownish-300 dark:text-brownish-50" for="default_cipher">{{ $t('admin.settings.defaultCipher') }}</label>
+          <select
+            id="default_cipher"
+            v-model="data.sharing.default_cipher"
+            :disabled="loading"
+            data-testid="admin-default-cipher-select"
+            class="w-full bg-white dark:bg-brownish-800 border border-paper-300 dark:border-brownish-700 text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-redish-500"
+          >
+            <!-- eslint-disable @intlify/vue-i18n/no-raw-text -->
+            <option value="aegis128l">AEGIS-128L</option>
+            <option value="aegis256">AEGIS-256</option>
+            <option value="ascon128a">Ascon-128a</option>
+            <option value="chacha20poly1305">ChaCha20-Poly1305</option>
+            <!-- eslint-enable @intlify/vue-i18n/no-raw-text -->
+          </select>
+          <p class="text-xs text-brownish-400 dark:text-brownish-50 leading-relaxed mt-1">
+            {{ $t('admin.settings.defaultCipherHint') }}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="-mx-4 px-6 py-5 border-b border-paper-200 dark:border-brownish-700/50">
+      <div class="flex items-center gap-2 mb-3">
+        <BaseIcon :path="mdiDatabase" :size="14" class="text-brownish-400 dark:text-brownish-50" />
+        <p class="text-xs font-semibold text-brownish-400 dark:text-brownish-50">{{ $t('admin.settings.defaultQuota') }}</p>
+      </div>
+      <p class="text-xs text-brownish-400 dark:text-brownish-50 leading-relaxed mb-3">{{ $t('admin.settings.defaultQuotaHint') }}</p>
+      <QuotaSlider
+        v-model="data.users.quota_bytes"
+        :disabled="loading"
+      />
+    </div>
+
+    <div class="-mx-4 -mb-4 px-6 py-4 rounded-b-2xl">
+      <div v-if="error" class="rounded-lg bg-redish-500/10 border border-redish-500/30 px-4 py-3 mb-3">
+        <p class="text-sm text-redish-400 dark:text-redish-100">{{ error }}</p>
+      </div>
+
+      <BaseButton
+        color="info"
+        :disabled="loading"
+        :icon="mdiContentSave"
+        :label="loading ? $t('admin.settings.saving') : $t('admin.settings.saveSettings')"
+        @click="emits('save')"
+      />
+    </div>
+  </CardBox>
+</template>

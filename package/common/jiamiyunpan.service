@@ -1,0 +1,16 @@
+[Unit]
+Description=甲米云盘 (Jiami Drive)
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30
+User=jiamiyunpan
+ExecStart=/usr/bin/jiamiyunpan
+Environment="ENV_FILE=/etc/jiamiyunpan.conf"
+StandardOutput=append:/var/log/jiamiyunpan.log
+StandardError=append:/var/log/jiamiyunpan.log
+
+[Install]
+WantedBy=multi-user.target

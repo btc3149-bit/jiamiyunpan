@@ -1,0 +1,224 @@
+<script setup lang="ts">
+import TableCheckboxCell from '@/components/ui/TableCheckboxCell.vue'
+import TruncatedSpan from '@/components/ui/TruncatedSpan.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseIcon from '@/components/ui/BaseIcon.vue'
+import { formatPrettyDate, formatSize } from '!'
+import { store as linksStore } from '!/links'
+import { mdiOpenInNew, mdiDownload } from '@mdi/js'
+import type { AppLink } from 'types'
+import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const props = defineProps<{
+  link: AppLink
+  checkedRows: Partial<AppLink>[]
+  highlighted?: boolean
+  sizes: {
+    checkbox: string
+    name: string
+    size: string
+    createdAt: string
+    expiresAt: string
+    buttons: string
+  }
+}>()
+
+const emits = defineEmits<{
+  (event: 'link', link: AppLink): void
+  (event: 'select-one', value: boolean, link: AppLink): void
+  (event: 'deselect-all'): void
+}>()
+
+const selectOne = (value: boolean) => {
+  emits('select-one', value, props.link)
+}
+
+const { t } = useI18n()
+const Links = linksStore()
+const thumbnail = ref<string | undefined>(props.link.thumbnail)
+const thumbnailLoading = ref(false)
+
+watch(
+  () => [props.link.id, props.link.thumbnail, props.link.has_thumbnail],
+  async () => {
+    thumbnail.value = props.link.thumbnail
+
+    if (thumbnail.value || !props.link.has_thumbnail) return
+
+    thumbnailLoading.value = true
+    try {
+      thumbnail.value = await Links.loadThumbnail(props.link)
+    } catch {
+      // A missing thumbnail is cosmetic — the row just stays icon-less.
+    } finally {
+      thumbnailLoading.value = false
+    }
+  },
+  { immediate: true }
+)
+
+const checked = computed({
+  get: () => !!props.checkedRows.find((item) => item.id === props.link.id),
+  set: (v) => selectOne(v)
+})
+
+const linkName = computed(() => {
+  return props.link.name || '...'
+})
+
+const linkSize = computed(() => {
+  return props.link.file_size ? formatSize(props.link.file_size) : ''
+})
+
+const linkCreatedAt = computed(() => {
+  return props.link.created_at ? formatPrettyDate(props.link.created_at) : ''
+})
+
+const fileCreatedAt = computed(() => {
+  return props.link.file_modified_at ? formatPrettyDate(props.link.file_modified_at) : ''
+})
+
+const linkExpiresAt = computed(() => {
+  return props.link.expires_at ? formatPrettyDate(props.link.expires_at) : t('common.never')
+})
+
+const isExpired = computed(() => {
+  const now = new Date().valueOf() / 1000
+
+  return props.link?.expires_at && props.link?.expires_at < now
+})
+
+const sharedClass = computed(() => {
+  return 'dark:bg-brownish-900 hover:bg-paper-100 hover:dark:bg-brownish-700'
+})
+
+const border = 'sm:border-l sm:border-paper-300 sm:dark:border-brownish-950'
+const sizes = computed(() => {
+  return {
+    checkbox: `${props.sizes.checkbox}`,
+    name: `${props.sizes.name}`,
+    size: `${border} ${props.sizes.size}`,
+    createdAt: `${border} ${props.sizes.createdAt}`,
+    expiresAt: `${border} ${props.sizes.expiresAt}`,
+    buttons: `${props.sizes.buttons} text-right`
+  }
+})
+
+const clicks = ref(0)
+const timer = ref()
+
+/**
+ * Click listener
+ * that handles single and double clicks
+ */
+const click = () => {
+  clicks.value++
+  if (clicks.value === 1) {
+    singleClick()
+
+    timer.value = setTimeout(() => {
+      clicks.value = 0
+    }, 250)
+  }
+
+  if (clicks.value === 2) {
+    clicks.value = 0
+    clearTimeout(timer.value)
+    doubleClick()
+  }
+}
+
+const doubleClick = () => {
+  emits('link', props.link)
+}
+
+const singleClick = () => {
+  emits('deselect-all')
+  selectOne(!checked.value)
+}
+</script>
+
+<template>
+  <div
+    class="w-full flex link-row-separator"
+    :class="{
+      'bg-greeny-100 dark:bg-greeny-900 hover:bg-greeny-200 hover:dark:bg-greeny-800':
+        props.highlighted,
+      [sharedClass]: true
+    }"
+  >
+    <div :class="sizes.checkbox">
+      <TableCheckboxCell v-model="checked" :label="$t('common.selectRow', { name: link.name })" />
+    </div>
+
+    <button
+      :class="`${sizes.name} flex justify-start cursor-pointer prevent-select text-left`"
+      :title="linkName"
+      @click="click"
+    >
+      <img
+        name="thumbnail"
+        v-if="thumbnail"
+        :src="thumbnail"
+        :alt="linkName"
+        class="w-6 h-6 mr-2 rounded-md"
+      />
+      <span
+        v-else-if="thumbnailLoading"
+        name="thumbnail-placeholder"
+        class="inline-block w-6 h-6 mr-2 animate-pulse bg-paper-100 dark:bg-brownish-700 rounded-md"
+      />
+
+      <TruncatedSpan :text="linkName" />
+
+      <span class="flex ml-3">
+        <BaseIcon :path="mdiDownload" :size="15" />
+
+        {{ link.downloads }}
+      </span>
+    </button>
+
+    <div :class="sizes.size" :title="linkSize">
+      <TruncatedSpan :text="linkSize || '-'" />
+    </div>
+
+    <div :class="sizes.createdAt" :title="$t('links.table.fileCreated', { date: fileCreatedAt })">
+      <TruncatedSpan :text="linkCreatedAt" />
+    </div>
+
+    <div :class="sizes.expiresAt" :title="linkExpiresAt">
+      <span v-if="isExpired" class="inline-block text-redish-700 dark:text-redish-100">{{ $t('links.table.expired') }}</span>
+      <TruncatedSpan v-else :text="linkExpiresAt" />
+    </div>
+
+    <div :class="sizes.buttons">
+      <BaseButton
+        :title="$t('links.table.viewLink')"
+        :icon="mdiOpenInNew"
+        color="dark"
+        small
+        rounded-full
+        class="ml-2 float-right"
+        :to="{ name: 'links-view', params: { link_id: link.id }, hash: `#${link.link_key_hex}` }"
+        target="_blank"
+        v-if="link"
+      />
+    </div>
+  </div>
+</template>
+<style lang="css">
+.prevent-select {
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+.link-row-separator {
+  box-shadow: inset 0 -1px 0 0 rgba(120, 120, 120, 0.15);
+}
+
+.dark .link-row-separator {
+  box-shadow: inset 0 -1px 0 0 rgba(120, 120, 120, 0.1);
+}
+</style>

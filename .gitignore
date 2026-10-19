@@ -1,0 +1,21 @@
+/target
+.env
+sqlite.db
+/data/
+node_modules
+.DS_Store
+.turbo
+dist
+server/src/client.rs
+/.dev
+
+# Playwright
+web/playwright-report/
+web/test-results/
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# nix build output symlinks
+result
+result-*

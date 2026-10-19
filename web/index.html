@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
+  <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
+  <link rel="apple-touch-icon" sizes="72x72" href="/apple-icon-72x72.png">
+  <link rel="apple-touch-icon" sizes="76x76" href="/apple-icon-76x76.png">
+  <link rel="apple-touch-icon" sizes="114x114" href="/apple-icon-114x114.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="/apple-icon-120x120.png">
+  <link rel="apple-touch-icon" sizes="144x144" href="/apple-icon-144x144.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/apple-icon-152x152.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/android-icon-192x192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/android-icon-512x512.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <title>甲米云盘 · 端到端加密云存储</title>
+
+  <meta name="description" content="甲米云盘 —— 自托管的端到端加密云存储，服务端只存密文">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/inter-400-latin.woff2">
+  <link rel="stylesheet" href="/fonts/inter.css">
+
+  <!--
+    Boot splash. Styles are inline because the stylesheet is part of the
+    bundle this is covering for, and the theme class isn't on <html> until
+    the app runs, so it follows the OS instead.
+
+    Nothing is drawn for the first second. A boot that beats it should look
+    instant rather than blink a spinner on and off, so on a healthy load this
+    markup is never seen at all. The hint follows only if the bundle still
+    hasn't arrived after twelve seconds — the difference between "slow" and
+    "this is broken".
+  -->
+  <style>
+    #boot {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.25rem;
+      background: #f5f5f4;
+      color: #555555;
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      opacity: 0;
+      animation: boot-in 400ms ease-out 1s forwards;
+    }
+
+    #boot-bytes {
+      min-height: 1.25rem;
+      font-size: 0.8125rem;
+      font-variant-numeric: tabular-nums;
+      opacity: 0.7;
+    }
+
+    #boot-spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      opacity: 0.4;
+      animation: boot-spin 700ms linear infinite;
+    }
+
+    #boot-hint {
+      max-width: 22rem;
+      padding: 0 1.5rem;
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      text-align: center;
+      opacity: 0;
+      animation: boot-in 300ms ease-out 12s forwards;
+    }
+
+    @keyframes boot-in {
+      to { opacity: 1; }
+    }
+
+    @keyframes boot-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-color-scheme: dark) {
+      #boot {
+        background: #1E1E1E;
+        color: #939393;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      /* Drop the spin and the fade, but keep the delays — those are timing
+         rather than motion, and they're what stops this appearing at all on
+         a healthy boot. */
+      #boot,
+      #boot-hint {
+        animation-duration: 1ms;
+      }
+
+      /* Still says "working" without the rotation. A static ring here reads
+         as a stalled boot, which is the one message this screen must not send. */
+      #boot-spinner {
+        animation: boot-fade 1.6s ease-in-out infinite;
+        border-top-color: currentColor;
+      }
+
+      @keyframes boot-fade {
+        0%, 100% { opacity: 0.25; }
+        50% { opacity: 0.6; }
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <noscript>
+    <strong>
+      We're sorry but this app due to its nature of in-browser encryption
+      does not work without Javascript enabled. Please enable it to continue.
+    </strong>
+  </noscript>
+  <!-- Outside #app on purpose: Vue mounting only means the shell arrived,
+       while the route views are still downloading. The splash stays up until
+       the router has actually rendered the first view — App.vue removes it. -->
+  <div id="boot">
+    <div id="boot-spinner"></div>
+    <div id="boot-bytes"></div>
+    <p id="boot-hint">
+      This is taking longer than expected — most likely a slow connection.
+      Hang tight, it's still working.
+    </p>
+  </div>
+
+  <div id="app"></div>
+
+  <!--
+    Build-only bootstrap. The build strips the stylesheet, module preloads
+    and the entry script, and lists them in __BOOT_ASSETS__; every one is
+    fetched here in parallel with a combined byte counter feeding
+    #boot-bytes, then reinstated — from HTTP cache, since assets are
+    content-hashed and immutable, so nothing downloads twice. Any hiccup
+    reinstates the tags immediately: the bootstrap can only ever add
+    progress, not block the app. In dev the marker doesn't exist and this
+    is a no-op.
+  -->
+  <script>
+    (async () => {
+      const assets = window.__BOOT_ASSETS__
+      if (!assets || !assets.length) return
+
+      const attach = (asset) => {
+        if (asset.attached) return
+        asset.attached = true
+
+        if (asset.kind === 'css') {
+          const link = document.createElement('link')
+          link.rel = 'stylesheet'
+          link.href = asset.url
+          document.head.appendChild(link)
+        } else if (asset.kind === 'entry') {
+          const script = document.createElement('script')
+          script.type = 'module'
+          script.crossOrigin = ''
+          script.src = asset.url
+          document.head.appendChild(script)
+        }
+        // Preloaded chunks need no tag: fetching them was the whole point,
+        // and the entry's own imports now hit the warm cache.
+      }
+
+      const counter = document.getElementById('boot-bytes')
+      const total = assets.reduce((sum, asset) => sum + (asset.size || 0), 0)
+      let received = 0
+
+      const track = async (asset) => {
+        const response = await fetch(asset.url)
+        if (!response.ok) throw new Error(asset.url)
+
+        if (!response.body) {
+          await response.arrayBuffer()
+        } else {
+          const reader = response.body.getReader()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+
+            received += value.length
+            if (counter && total) {
+              counter.textContent = Math.min(99, Math.round((received / total) * 100)) + '%'
+            }
+          }
+        }
+
+        // Styles apply the moment they're here; scripts wait for the rest.
+        if (asset.kind === 'css') attach(asset)
+      }
+
+      try {
+        await Promise.all(assets.map(track))
+        if (counter) counter.textContent = ''
+        assets.forEach(attach)
+      } catch {
+        if (counter) counter.textContent = ''
+        assets.forEach(attach)
+      }
+    })()
+  </script>
+  <script type="module" src="/src/main.ts"></script>
+  <!-- built files will be auto injected -->
+</body>
+
+</html>

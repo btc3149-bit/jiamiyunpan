@@ -1,0 +1,63 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import CardBox from '@/components/ui/CardBox.vue'
+import OverlayLayer from '@/components/ui/OverlayLayer.vue'
+import { useFocusTrap } from '@/composables/useFocusTrap'
+import type { FormType } from '../form'
+
+const props = defineProps<{
+  title?: string
+  modelValue: boolean | undefined
+  form?: FormType
+}>()
+
+const emit = defineEmits(['update:modelValue', 'cancel', 'confirm'])
+
+const value = computed({
+  get: () => props.modelValue,
+  set: (value) => emit('update:modelValue', value)
+})
+
+const card = ref()
+const cardEl = computed<HTMLElement | null>(() => card.value?.$el ?? null)
+const isOpen = computed(() => !!props.modelValue)
+
+useFocusTrap(cardEl, isOpen)
+
+const cancel = () => {
+  if (props.form) {
+    props.form.handleReset()
+  }
+
+  value.value = false
+  emit('cancel')
+}
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape' && value.value) {
+    cancel()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+</script>
+
+<template>
+  <OverlayLayer :visible="value" @overlay-click="cancel">
+    <CardBox
+      v-show="value"
+      ref="card"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="title"
+      tabindex="-1"
+      class="relative max-h-modal w-8/12 md:w-3/5 lg:w-2/5 xl:w-1/12 z-50 py-2 focus:outline-none"
+      rounded="rounded-md"
+      :hasComponentLayout="true"
+      is-modal
+    >
+      <slot />
+    </CardBox>
+  </OverlayLayer>
+</template>

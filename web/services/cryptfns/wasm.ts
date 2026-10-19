@@ -1,0 +1,149 @@
+import {
+  // default as i,
+  crc16_digest,
+  sha256_digest,
+  rsa_generate_private,
+  rsa_public_from_private,
+  rsa_decrypt,
+  rsa_encrypt,
+  rsa_fingerprint_public,
+  rsa_fingerprint_private,
+  rsa_sign,
+  rsa_sign_bytes,
+  rsa_verify,
+  rsa_verify_bytes,
+  rsa_public_key_size,
+  rsa_private_key_size,
+  wrapping_generate_private,
+  wrapping_public_from_private,
+  wrapping_wrap,
+  wrapping_unwrap,
+  ed25519_generate_private,
+  ed25519_public_from_private,
+  ed25519_sign,
+  ed25519_verify,
+  ed25519_sign_bytes,
+  ed25519_verify_bytes,
+  spki_fingerprint,
+  aes_generate_key,
+  aes_encrypt,
+  aes_decrypt,
+  chacha_generate_key,
+  chacha_encrypt,
+  chacha_decrypt,
+  cipher_generate_key,
+  cipher_encrypt,
+  cipher_decrypt,
+  cipher_encrypt_string,
+  cipher_decrypt_string,
+  cipher_encrypt_chunk,
+  cipher_decrypt_chunk,
+  search_root_key,
+  search_file_key,
+  search_tag,
+  search_tag_tokens,
+  share_payload_encode_v1,
+  audit_event_sig_input_encode_v1,
+  audit_event_encode_v1,
+  entries_encode_v1,
+  member_sig_encode_v1,
+  folder_member_list_encode_v1,
+  opaque_client_registration_start,
+  opaque_client_registration_finish,
+  opaque_client_login_start,
+  opaque_client_login_finish,
+  envelope_derive_kek,
+  envelope_seal,
+  envelope_open,
+  envelope_rewrap,
+  transition_sign,
+  transition_verify,
+  key_rotation_audit_sign
+} from '../../node_modules/transfer/transfer.js'
+// @ts-ignore — resolved by the wasm plugin; carries the module's linear memory.
+import { memory as wasmMemory } from '../../node_modules/transfer/transfer_bg.wasm'
+
+/**
+ * Bytes of linear memory the main thread's wasm instance has reserved.
+ * Wasm memory never shrinks, so this is also the session's high-water
+ * mark — the debug overlay watches it against the wasm32 4 GB ceiling.
+ */
+export function wasmMemoryBytes(): number {
+  return (wasmMemory as WebAssembly.Memory).buffer.byteLength
+}
+
+/**
+ * Currently we don't need this part.. it is working fine like this.
+ * When we do wasm-pack with --target web it works on the web, but
+ * it doesn't work on nodejs. So the tests are breaking which is not
+ * acceptable.
+ */
+// let initialized = false
+export async function init() {
+  // if (!initialized) {
+  //   await i()
+  //   initialized = true
+  // }
+}
+
+export {
+  crc16_digest,
+  sha256_digest,
+  rsa_generate_private,
+  rsa_public_from_private,
+  rsa_decrypt,
+  rsa_encrypt,
+  rsa_fingerprint_public,
+  rsa_fingerprint_private,
+  rsa_sign,
+  rsa_sign_bytes,
+  rsa_verify,
+  rsa_verify_bytes,
+  rsa_public_key_size,
+  rsa_private_key_size,
+  wrapping_generate_private,
+  wrapping_public_from_private,
+  wrapping_wrap,
+  wrapping_unwrap,
+  ed25519_generate_private,
+  ed25519_public_from_private,
+  ed25519_sign,
+  ed25519_verify,
+  ed25519_sign_bytes,
+  ed25519_verify_bytes,
+  spki_fingerprint,
+  aes_generate_key,
+  aes_encrypt,
+  aes_decrypt,
+  chacha_generate_key,
+  chacha_encrypt,
+  chacha_decrypt,
+  cipher_generate_key,
+  cipher_encrypt,
+  cipher_decrypt,
+  cipher_encrypt_string,
+  cipher_decrypt_string,
+  cipher_encrypt_chunk,
+  cipher_decrypt_chunk,
+  search_root_key,
+  search_file_key,
+  search_tag,
+  search_tag_tokens,
+  share_payload_encode_v1,
+  audit_event_sig_input_encode_v1,
+  audit_event_encode_v1,
+  entries_encode_v1,
+  member_sig_encode_v1,
+  folder_member_list_encode_v1,
+  opaque_client_registration_start,
+  opaque_client_registration_finish,
+  opaque_client_login_start,
+  opaque_client_login_finish,
+  envelope_derive_kek,
+  envelope_seal,
+  envelope_open,
+  envelope_rewrap,
+  transition_sign,
+  transition_verify,
+  key_rotation_audit_sign
+}

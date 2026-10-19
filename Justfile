@@ -1,0 +1,381 @@
+# Default: list available recipes
+default:
+    @just --list
+
+# ── Development ───────────────────────────────────────────────────────────────
+
+# Run frontend (Vite) and backend (bacon) together
+# Rebuilds WASM first so the browser always gets the latest crypto code.
+# Kills any stale jiamiyunpan binaries left over from previous sessions before starting.
+dev: wasm build-editor
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Kill any stale jiamiyunpan processes (debug or release) from previous sessions.
+    stale=$(pgrep -f "target/(debug|release)/jiamiyunpan" 2>/dev/null || true)
+    if [ -n "$stale" ]; then
+        echo "⚠  Killing stale jiamiyunpan process(es): $stale"
+        kill $stale 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    # Vite (frontend, hot-reload) runs in the background on :5173; its output
+    # goes to a log so bacon's terminal UI stays clean, and it's torn down on exit.
+    yarn workspace @jiamiyunpan/web run dev >/tmp/jiamiyunpan-vite.log 2>&1 &
+    vite_pid=$!
+    trap 'kill $vite_pid 2>/dev/null' EXIT
+    echo "▶ Vite (frontend)  http://localhost:5173   (logs: /tmp/jiamiyunpan-vite.log)"
+    echo "▶ Backend in bacon below — rebuilds + reruns on save; press r to restart, q to quit."
+    echo
+
+    # bacon's run-long job builds and runs the server, restarting on source
+    # changes, with interactive r=restart / q=quit. Replaces cargo-watch, which
+    # hangs at startup when given this workspace's full -w watch set.
+    bacon run-long
+
+# Run only the Vite frontend dev server
+dev-web:
+    yarn workspace @jiamiyunpan/web run dev
+
+# Run only the Rust backend (bacon: rebuild + rerun on save; r=restart, q=quit)
+dev-api:
+    bacon run-long
+
+# Run the Rust backend once without auto-reload
+run:
+    cargo run
+
+# ── WASM ──────────────────────────────────────────────────────────────────────
+
+# Build the transfer WASM crate (includes all cryptfns exports)
+wasm:
+    yarn workspace @jiamiyunpan/transfer run wasm-pack
+    mkdir -p web/node_modules/transfer
+    cp -R transfer/pkg/. web/node_modules/transfer/
+
+# Same as `wasm`, but with the fast-test-kdf feature so the OPAQUE KSF uses
+# cheap Argon2id params. For the e2e recipe only — never for production builds.
+wasm-e2e:
+    yarn workspace @jiamiyunpan/transfer run wasm-pack-e2e
+    mkdir -p web/node_modules/transfer
+    cp -R transfer/pkg/. web/node_modules/transfer/
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+
+# Build the @jiamiyunpan/editor workspace. web/ imports the compiled bundle from
+# editor/dist/, which is gitignored — a fresh checkout (or CI) has no dist
+# yet, so build-web (and test-web, dev, e2e) must run this first.
+build-editor:
+    yarn workspace @jiamiyunpan/editor run build
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+
+# Run all tests (Rust + frontend unit)
+test: test-rust test-web
+
+# Run all Rust tests (unit + integration)
+test-rust: test-rust-unit test-rust-integration
+
+# Run Rust unit tests across the workspace
+test-rust-unit:
+    cargo test --workspace --lib -- --nocapture
+
+# Run Rust integration tests (auth, storage, links, email, shares fixtures)
+#
+# The suite list is derived from the directory rather than kept by hand: the
+# hand-written one had drifted eleven suites behind — migration, fork, groups,
+# quota and the rest never ran locally, while CI derived its own list and ran
+# them. A green `just ci-test` has to mean what CI means. Helper modules
+# compile to zero-test targets, which is harmless and what clippy already
+# proves they can do.
+test-rust-integration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=""
+    for suite in $(ls server/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort); do
+        args="$args --test $suite"
+    done
+    echo "Running:$args"
+    cargo test $args -- --nocapture
+
+# ── Postgres integration testing ──────────────────────────────────────────────
+
+# Start the throwaway Postgres container used by the integration suite
+# and block until its healthcheck reports ready.
+test-pg-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose up -d postgres-test
+    echo "Waiting for postgres-test to be healthy..."
+    for i in $(seq 1 60); do
+        status=$(docker inspect -f '{{{{.State.Health.Status}}' postgres-test 2>/dev/null || echo "starting")
+        if [ "$status" = "healthy" ]; then
+            echo "postgres-test is healthy"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "postgres-test did not become healthy within 60s"
+    docker compose logs postgres-test
+    exit 1
+
+# Stop and remove the throwaway Postgres container.
+test-pg-down:
+    docker compose stop postgres-test
+    docker compose rm -f postgres-test
+
+# Run the integration suite against Postgres. Brings the container up
+# first and tears it down on exit regardless of test outcome — the trap
+# fires on success, failure, and Ctrl-C alike.
+test-rust-integration-pg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just test-pg-up
+    trap 'just test-pg-down' EXIT
+    export TEST_DATABASE_URL="postgres://jiamiyunpan_test:jiamiyunpan_test@localhost:5433/jiamiyunpan_test"
+    just test-rust-integration
+
+# Run Rust tests for the transfer crate only
+test-transfer:
+    cargo test -p transfer
+
+# Run frontend unit tests (Vitest)
+test-web: build-editor
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # transfer WASM uses externref; older Node versions can't parse it and
+    # every spec fails to load with a cryptic WebAssembly.compile() error.
+    # Fail loud with the real fix instead of letting the user chase it.
+    required=$(cat .nvmrc 2>/dev/null || echo 22)
+    actual=$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')
+    if [ -z "$actual" ] || [ "$actual" -lt "$required" ]; then
+        echo "error: Node ${required}+ required (got $(node --version 2>/dev/null || echo 'none'))"
+        echo "       The transfer WASM crate uses reference-types (externref) that older Node rejects."
+        echo "       Run 'nvm use' (reads .nvmrc) or install Node ${required}."
+        exit 1
+    fi
+    yarn workspace @jiamiyunpan/web run test:unit
+
+# Run frontend unit tests in watch mode
+test-watch:
+    yarn workspace @jiamiyunpan/web run test:watch
+
+# Run E2E tests: build backend, start it, run Playwright, then clean up.
+# Pass any Playwright flags as extra args, e.g.
+#   PWSLOWMO=500 just e2e --headed
+#   just e2e --headed -g "Reader"
+#   just e2e e2e/shares-basic.spec.ts --headed
+#   just e2e --debug -g "Reader"
+e2e *args:
+    #!/usr/bin/env bash
+    set -eo pipefail
+
+    # A dev server already on these ports would either collide with the
+    # release binary below or, worse, serve the suite stale code. Refuse
+    # loudly instead of hanging on the port for ten minutes.
+    if lsof -ti tcp:5443 -i tcp:5173 >/dev/null 2>&1; then
+        echo "ports 5443/5173 are in use — stop 'just dev' (or the stray server) first" >&2
+        exit 1
+    fi
+
+    export DATA_DIR=$PWD/data/e2e
+    export ENV_FILE=".env.e2e"
+
+    # Force plain HTTP for the e2e server regardless of what .env.e2e says,
+    # and override the base URL so Playwright connects on http://.
+    # MAILER_TYPE=none auto-verifies new accounts (no email confirmation needed).
+    export SSL_DISABLED=true
+    export APP_URL=http://localhost:5443
+    export APP_CLIENT_URL=http://localhost:5443
+    export MAILER_TYPE=none
+
+    mkdir -p "$DATA_DIR"
+
+    # The server bundles `web/dist/` into its binary via jiamiyunpan/build.rs,
+    # so a stale or missing `dist` makes every Playwright `page.goto` land
+    # on an empty 200 OK and every test time out waiting for selectors.
+    just wasm-e2e
+    just build-web
+
+    cargo build --bin jiamiyunpan --release
+    cargo build -p jiamiyunpan --bin seed_legacy --release --features e2e-seed
+
+    RUST_LOG=error $PWD/target/release/jiamiyunpan &
+    SERVER_PID=$!
+
+    cleanup() { kill -9 $SERVER_PID 2>/dev/null; rm -rf $PWD/data/e2e; }
+    trap cleanup EXIT
+
+    node_modules/.bin/wait-on -t 600000 http://127.0.0.1:5443/api/liveness
+
+    # Seed one legacy (RSA + bcrypt) account with a file and a public link.
+    # Registration is Curve25519 + OPAQUE only, so migration.spec.ts has no
+    # other way to obtain a migratable account. Runs after liveness (schema is
+    # migrated at boot) and before Playwright. The email, password and file
+    # name here must match the constants in web/e2e/migration.spec.ts.
+    $PWD/target/release/seed_legacy "$DATA_DIR/sqlite.db" "legacy-migrate@e2e.test" "legacy-password-1234" "$PWD/web/e2e/fixtures/test-image.png"
+
+    # Two more for reindex.spec.ts, one per test: pending re-index state can
+    # only come from the migrations (the write routes refuse everything that
+    # would recreate it), so each test brings its own pre-migration account.
+    $PWD/target/release/seed_legacy "$DATA_DIR/sqlite.db" "legacy-reindex-a@e2e.test" "legacy-password-1234" "$PWD/web/e2e/fixtures/test-image.png"
+    $PWD/target/release/seed_legacy "$DATA_DIR/sqlite.db" "legacy-reindex-b@e2e.test" "legacy-password-1234" "$PWD/web/e2e/fixtures/test-image.png"
+
+    export ENV_FILE="../.env.e2e"
+    yarn workspace @jiamiyunpan/web test:e2e -- {{args}}
+
+# Run the browser suite against S3-backed storage with direct transfer on, so
+# the browser fetches chunks from the bucket instead of from the server.
+#
+# The default `e2e` recipe covers the relaying path; this covers the one that
+# bypasses it. Both matter: direct transfer is opt-in, and the relaying path
+# stays the fallback for every deployment that cannot use it.
+#
+# S3_DIRECT_ALLOW_INSECURE is required here and not a shortcut: the harness
+# serves the app over plain HTTP on localhost against a bucket on localhost,
+# which is exactly the shape the transport preconditions refuse by default.
+e2e-direct *args:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    just minio-up
+    export STORAGE_PROVIDER=s3
+    export S3_BUCKET="${S3_BUCKET:-jiamiyunpan}"
+    export S3_REGION="${S3_REGION:-us-east-1}"
+    export S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:9000}"
+    export S3_ACCESS_KEY="${S3_ACCESS_KEY:-minioadmin}"
+    export S3_SECRET_KEY="${S3_SECRET_KEY:-minioadmin}"
+    export S3_PATH_STYLE=true
+    export S3_PREFIX="e2e-direct/"
+    export S3_DIRECT_TRANSFER=true
+    export S3_DIRECT_ALLOW_INSECURE=true
+    # Turns "server does not advertise direct transfer" from a skip into a
+    # failure: this recipe exists to prove the direct path, and a run where
+    # every direct spec quietly skipped would prove nothing while staying
+    # green.
+    export E2E_REQUIRE_DIRECT=true
+    just e2e {{args}}
+
+# Open Playwright test UI interactively (useful for debugging).
+# Pass any Playwright flags as extra args, e.g. just e2e-ui --headed
+e2e-ui *args:
+    yarn workspace @jiamiyunpan/web test:e2e:ui -- {{args}}
+
+# ── Code Quality ──────────────────────────────────────────────────────────────
+
+# Run Clippy with warnings as errors
+clippy:
+    cargo clippy -- -D warnings
+
+# Run Cargo check across the workspace
+check-rust:
+    cargo check
+
+# Run TypeScript type checking
+check-types:
+    yarn workspace @jiamiyunpan/web run type-check
+
+# Run all checks (clippy + TypeScript)
+check: clippy check-types
+
+# Run ESLint on the web frontend
+lint-web:
+    yarn workspace @jiamiyunpan/web run lint
+
+# Run all linters (clippy + ESLint)
+lint: clippy lint-web
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Build the web frontend for production
+build-web: build-editor
+    yarn workspace @jiamiyunpan/web run build
+
+# Build the Rust backend in release mode
+build-api:
+    cargo build --release
+
+# Build everything (WASM + web + API)
+build: wasm build-web build-api
+
+# ── Database ──────────────────────────────────────────────────────────────────
+
+# Start the PostgreSQL container
+db-up:
+    docker compose up -d postgres
+
+# Stop the PostgreSQL container
+db-down:
+    docker compose stop postgres
+
+# ── MinIO (S3) ───────────────────────────────────────────────────────────────
+
+# Start MinIO and create the default bucket
+minio-up:
+    docker compose up -d minio minio-init
+
+# Stop MinIO
+minio-down:
+    docker compose stop minio
+
+# Migrate file chunks from local filesystem to S3 (requires S3 env vars)
+migrate-storage:
+    cargo run --release -- migrate-storage
+
+# Run the S3 versioned-chunk integration suite.
+# Loads `.env` if present (see `.env.example` for the S3_* variables);
+# otherwise falls back to MinIO defaults and brings the container up.
+# Works against any S3-compatible backend — AWS, MinIO, Cloudflare R2, etc.
+test-s3-integration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f .env ]; then
+        echo "Loading .env for S3 integration tests..."
+        set -a; source ./.env; set +a
+    fi
+    endpoint="${S3_ENDPOINT:-http://127.0.0.1:9000}"
+    case "$endpoint" in
+        *127.0.0.1*|*localhost*)
+            echo "Using MinIO at $endpoint — ensuring container is up..."
+            just minio-up
+            ;;
+        *)
+            echo "Using remote S3 at $endpoint — skipping MinIO startup."
+            ;;
+    esac
+    cargo test -p fs --features s3-integration-tests providers::s3::s3_versioned_tests -- --nocapture
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+# First-time setup: install deps, build WASM, copy env
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "Installing JS dependencies..."
+    yarn install
+
+    if [ ! -f .env ]; then
+        echo "Creating .env from .env.example..."
+        cp .env.example .env
+    fi
+
+    echo "Building WASM crates..."
+    just wasm
+
+    echo "Building @jiamiyunpan/editor..."
+    just build-editor
+
+    echo "Installing Playwright browsers..."
+    cd web && npx playwright install chromium
+
+    echo "Done! Run 'just dev' to start developing."
+
+# ── CI Helpers ────────────────────────────────────────────────────────────────
+
+# Full CI test pipeline (used by GitHub Actions). `e2e-direct` needs Docker
+# for MinIO — without it the direct-transfer suite has no bucket to talk to
+# and every one of its specs self-skips, which is the same as not running it.
+ci-test: clippy test-rust-unit test-rust-integration wasm test-web build-web e2e e2e-direct
+
+# CI pipeline against Postgres instead of SQLite (clippy + unit + integration-pg).
+# Skips the WASM/web/e2e stack — those don't care which RDBMS the server uses.
+ci-test-pg: clippy test-rust-unit test-rust-integration-pg

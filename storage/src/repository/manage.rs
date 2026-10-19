@@ -1,0 +1,997 @@
+//! Repository module for manipulating with files in the database
+//! this module should only be used by the owner of the file
+use std::{collections::HashMap, fmt::Display, str::FromStr};
+
+use chrono::Utc;
+use entity::{
+    file_tokens::{DigestTags, SearchTags, Source},
+    file_versions, files, user_files, users, ActiveModelTrait, ActiveValue, ColumnTrait,
+    ConnectionTrait, EntityTrait, Order, QueryFilter, QueryOrder, Statement, Uuid, Value,
+};
+use error::{AppResult, Error};
+use validr::Validation;
+
+use super::Repository;
+use crate::data::{
+    content_tokens::ContentTokens,
+    app_file::AppFile, extra_tokens::ExtraTokens, query::Query as RequestQuery, reindex::Reindex,
+    rename::Rename, replace_content::ValidatedReplaceContent, response::Response,
+    set_editable::SetEditable, update_hashes::UpdateHashes,
+};
+use futures::future::try_join_all;
+
+pub(crate) struct Manage<'repository, T: ConnectionTrait> {
+    repository: &'repository Repository<'repository, T>,
+    owner_id: Uuid,
+}
+
+impl<'repository, T> Manage<'repository, T>
+where
+    T: ConnectionTrait,
+{
+    pub(crate) fn new(repository: &'repository Repository<'repository, T>, owner_id: Uuid) -> Self {
+        Self {
+            repository,
+            owner_id,
+        }
+    }
+
+    /// Alias to get the file metadata for the owner
+    pub(crate) async fn file(&self, id: Uuid) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+
+        if file.is_dir() {
+            return Err(Error::BadRequest("file_not_found".to_string()));
+        }
+
+        Ok(file)
+    }
+
+    /// List the files and folders visible to the caller inside a
+    /// directory (or at the root).
+    ///
+    /// When `dir_id` is `None` (root listing) and the caller hasn't
+    /// passed `is_owner` explicitly, the default is "only what I own"
+    /// — shared content surfaces via the dedicated `/share/with-me`
+    /// view, not at the root.
+    ///
+    /// When `dir_id` is `Some(_)`, the listing includes every
+    /// `user_files` row the caller has for that directory's children,
+    /// owner or non-owner. This is what makes the Shared-with-me row
+    /// click-through into the file browser work — a recipient browses
+    /// a shared folder and sees every file they have a key for, no
+    /// matter who originally uploaded it.
+    pub(crate) async fn find(&self, request_query: RequestQuery) -> AppResult<Response> {
+        let mut parents = vec![];
+
+        let user_id = self.owner_id;
+        let scoped_by_dir = request_query.dir_id.is_some();
+        let restrict_to_owner = match request_query.is_owner {
+            Some(value) => Some(value),
+            None if scoped_by_dir => None,
+            None => Some(true),
+        };
+        let mut selector = match request_query.compact.unwrap_or(false) {
+            true => self.repository.compact_selector(user_id, false),
+            false => self.repository.selector(user_id, false),
+        };
+        if let Some(is_owner) = restrict_to_owner {
+            selector = selector.filter(user_files::Column::IsOwner.eq(is_owner));
+        }
+
+        if let Some(dir_id) = request_query.dir_id.as_ref() {
+            let file_id = Uuid::from_str(dir_id)
+                .map_err(|_| Error::BadRequest("invalid_dir_id".to_string()))?;
+
+            parents = self.dir_tree(file_id).await?;
+
+            selector = selector.filter(files::Column::FileId.eq(file_id));
+        } else if request_query.editable.is_some() {
+            // When filtering by editable, return files from ALL folders
+        } else {
+            selector = selector.filter(files::Column::FileId.is_null());
+        }
+
+        if request_query.dirs_only.unwrap_or(false) {
+            selector = selector.filter(files::Column::Mime.eq("dir"));
+        }
+
+        if let Some(editable) = request_query.editable {
+            selector = selector.filter(files::Column::Editable.eq(editable));
+        }
+
+        let mut order = Order::Asc;
+        if let Some(ord) = &request_query.order {
+            if ord == "desc" {
+                order = Order::Desc;
+            }
+        }
+
+        if let Some(order_by) = request_query.order_by.as_ref() {
+            let column = match order_by.as_str() {
+                "modified_at" => files::Column::FileModifiedAt,
+                "size" => files::Column::Size,
+                _ => return Err(Error::BadRequest("invalid_order_by".to_string())),
+            };
+
+            selector = selector.order_by(column, order);
+        }
+
+        let mut children = selector
+            .into_model::<AppFile>()
+            .all(self.repository.connection())
+            .await
+            .map_err(Error::from)?;
+        self.repository.enrich_owner_emails(&mut children).await?;
+        self.repository
+            .enrich_shared_with_counts(&mut children)
+            .await?;
+        self.repository.enrich_owner_emails(&mut parents).await?;
+        self.repository
+            .enrich_shared_with_counts(&mut parents)
+            .await?;
+        Ok(Response { parents, children })
+    }
+
+    /// Breadcrumb trail from the given directory up to the highest
+    /// ancestor the caller can see.
+    ///
+    /// "Can see" means the caller has a `user_files` row for it —
+    /// owner or non-owner. When a recipient navigates into a folder
+    /// shared with them, the trail stops at that shared root because
+    /// they have no row for the owner's ancestor directories. For
+    /// owner callers the trail walks all the way back to root, same
+    /// as before.
+    pub(crate) async fn dir_tree(&self, id: Uuid) -> AppResult<Vec<AppFile>> {
+        let sql = r#"
+            WITH RECURSIVE file_tree(id, file_id) AS (
+                SELECT id, file_id FROM files WHERE id = $1 AND mime = 'dir'
+                UNION ALL
+                SELECT f.id, f.file_id FROM files f
+                JOIN file_tree a ON a.file_id = f.id
+            )
+            SELECT * FROM file_tree;
+        "#;
+
+        let ids: Vec<Uuid> = files::Entity::find()
+            .from_raw_sql(Statement::from_sql_and_values(
+                self.repository.connection().get_database_backend(),
+                sql,
+                [id.into()],
+            ))
+            .into_json()
+            .all(self.repository.connection())
+            .await?
+            .into_iter()
+            .map(|json| {
+                Uuid::from_str(json.get("id").unwrap().as_str().unwrap_or_default())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let user_id = self.owner_id;
+
+        let mut results = self
+            .repository
+            .selector(user_id, false)
+            .filter(files::Column::Id.is_in(ids))
+            .filter(files::Column::Mime.eq("dir"))
+            .into_model::<AppFile>()
+            .all(self.repository.connection())
+            .await
+            .map_err(Error::from)?;
+
+        // Sort by ascending depth so ancestors appear in root-first (breadcrumb) order.
+        let id_to_idx: HashMap<Uuid, usize> =
+            results.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
+        let depths: Vec<usize> = (0..results.len())
+            .map(|i| {
+                let mut depth = 0usize;
+                let mut current = results[i].file_id;
+                while let Some(parent_id) = current {
+                    if let Some(&parent_idx) = id_to_idx.get(&parent_id) {
+                        depth += 1;
+                        current = results[parent_idx].file_id;
+                    } else {
+                        break;
+                    }
+                }
+                depth
+            })
+            .collect();
+        results.sort_by(|a, b| depths[id_to_idx[&a.id]].cmp(&depths[id_to_idx[&b.id]]));
+
+        if results.is_empty() {
+            return Err(Error::NotFound("directory_not_found".to_string()));
+        }
+
+        Ok(results)
+    }
+
+    /// Get the file or a directory, if we get a directory we will also
+    /// recursively get all the files and directories inside it
+    pub(crate) async fn file_tree(&self, id: Uuid) -> AppResult<Vec<AppFile>> {
+        let sql = r#"
+            WITH RECURSIVE file_tree(id, file_id) AS (
+            SELECT id, file_id FROM files WHERE id = $1
+            UNION ALL
+            SELECT child.id, child.file_id FROM files child
+            JOIN file_tree parent ON parent.id = child.file_id
+            )
+            SELECT id, file_id FROM file_tree;
+        "#;
+
+        let ids = files::Entity::find()
+            .from_raw_sql(Statement::from_sql_and_values(
+                self.repository.connection().get_database_backend(),
+                sql,
+                [id.into()],
+            ))
+            .into_json()
+            .all(self.repository.connection())
+            .await?
+            .into_iter()
+            .map(|json| {
+                let id = json.get("id").unwrap().as_str().unwrap_or_default();
+
+                match Uuid::from_str(id) {
+                    Ok(id) => id,
+                    Err(_) => Uuid::nil(),
+                }
+            })
+            .collect::<Vec<Uuid>>();
+
+        let user_id = self.owner_id;
+
+        let results = self
+            .repository
+            .selector(user_id, true)
+            .filter(files::Column::Id.is_in(ids))
+            .into_model::<AppFile>()
+            .all(self.repository.connection())
+            .await
+            .map_err(Error::from)?;
+
+        if results.is_empty() {
+            return Err(Error::NotFound("directory_not_found".to_string()));
+        }
+
+        Ok(results)
+    }
+
+    /// Load the file from the database by its name hash and by its parent id
+    /// this method can be used to verify if you already have a file with the same name
+    /// in the directory. In case the file already exist we can check if we could resume its upload
+    pub(crate) async fn by_name<V>(&self, hash: V, parent_id: Option<Uuid>) -> AppResult<AppFile>
+    where
+        V: Into<Value> + Display + Clone,
+    {
+        let user_id = self.owner_id;
+
+        let mut selector = self
+            .repository
+            .selector(user_id, true)
+            .filter(files::Column::NameHash.eq(hash.clone()));
+
+        if let Some(parent_id) = parent_id {
+            selector = selector.filter(files::Column::FileId.eq(parent_id));
+        } else {
+            selector = selector.filter(files::Column::FileId.is_null());
+        }
+
+        selector
+            .filter(user_files::Column::UserId.eq(user_id))
+            .filter(user_files::Column::IsOwner.eq(true))
+            .into_model::<AppFile>()
+            .one(self.repository.connection())
+            .await
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::NotFound("file_not_found".to_string()))
+    }
+
+    /// Move multiple files and folders to a new parent directory
+    pub(crate) async fn move_many(
+        &self,
+        mut ids: Vec<Uuid>,
+        file_id: Option<Uuid>,
+    ) -> AppResult<u64> {
+        ids.sort();
+        ids.dedup();
+
+        if let Some(f) = file_id {
+            if ids.contains(&f) {
+                return Err(Error::BadRequest("cannot_move_to_itself".to_string()));
+            }
+        }
+
+        let existing_file_ids = self
+            .repository
+            .selector(self.owner_id, true)
+            .filter(files::Column::Id.is_in(ids))
+            .into_model::<AppFile>()
+            .all(self.repository.connection())
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>();
+
+        let active_model = files::ActiveModel {
+            file_id: ActiveValue::Set(file_id),
+            ..Default::default()
+        };
+
+        let results = files::Entity::update_many()
+            .filter(files::Column::Id.is_in(existing_file_ids))
+            .set(active_model)
+            .exec(self.repository.connection())
+            .await?;
+
+        Ok(results.rows_affected)
+    }
+
+    /// Rewrite a file's search tags and `name_hash` without touching its
+    /// content or its name.
+    ///
+    /// Deliberately not routed through [`Self::rename`], which would run the
+    /// duplicate-name check against the very hash it is about to write and
+    /// reject the file for colliding with itself.
+    pub(crate) async fn reindex(&self, id: Uuid, data: Reindex) -> AppResult<AppFile> {
+        let (name_hash, fingerprint, search_tags, content_tags, digest_tags, hashes) =
+            data.into_parts()?;
+        let file = self.repository.by_id(id, self.owner_id).await?;
+
+        if !file.is_owner {
+            return Err(Error::Forbidden("cannot_reindex_not_owner".to_string()));
+        }
+
+        // The session cookie outlives a key rotation, and pending is derived
+        // from `name_hash` shape alone. A sweep that started under the old
+        // key would otherwise store a 32-hex tag, leave the list, and never
+        // match a query under the new one. The fingerprint is the epoch.
+        let owner = users::Entity::find_by_id(self.owner_id)
+            .one(self.repository.connection())
+            .await?
+            .ok_or_else(|| Error::NotFound("user_not_found".to_string()))?;
+        if fingerprint != owner.fingerprint {
+            return Err(Error::BadRequest("reindex_key_rotated".to_string()));
+        }
+
+        // Absent digests stay untouched rather than being blanked: a sweep
+        // re-keys the values the row already carries, and a file whose row
+        // never had a digest has nothing to re-key.
+        let keyed = |value: Option<String>| match value {
+            Some(v) => ActiveValue::Set(Some(v)),
+            None => ActiveValue::NotSet,
+        };
+
+        files::ActiveModel {
+            id: ActiveValue::Set(id),
+            name_hash: ActiveValue::Set(name_hash),
+            md5: keyed(hashes.md5),
+            sha1: keyed(hashes.sha1),
+            sha256: keyed(hashes.sha256),
+            blake2b: keyed(hashes.blake2b),
+            ..Default::default()
+        }
+        .update(self.repository.connection())
+        .await?;
+
+        let tokens = self.repository.tokens(self.owner_id);
+        tokens.reindex(id, search_tags).await?;
+        tokens
+            .replace_source(id, Source::Content, content_tags)
+            .await?;
+        tokens.replace_digests(id, digest_tags).await?;
+
+        self.repository.by_id(id, self.owner_id).await
+    }
+
+    /// Rename a file or directory.
+    ///
+    /// The route layer gates this with `permission::require_write` plus
+    /// the editable-and-not-dir guard when the
+    /// caller is a non-owner. For owner callers there's no extra guard
+    /// — owners can rename anything they own.
+    pub(crate) async fn rename(&self, id: Uuid, data: Rename) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+        let (mut active_model, mut search_tags, name_hash) = data.into_active_model(id)?;
+
+        if file.is_owner {
+            if self.by_name(&name_hash, file.file_id).await.is_ok() {
+                return Err(Error::BadRequest("file_already_exists".to_string()));
+            }
+        } else {
+            // An editor holds the file key but not the owner's root key. The
+            // name_hash and root-scope tags are keyed under that root key, so a
+            // value produced here would be one the owner can never match —
+            // leaving the owner's index looking corrupt. Keep both as the owner
+            // last wrote them; only the file-scope tags, keyed under the file
+            // key the editor does hold, refresh.
+            active_model.name_hash = ActiveValue::NotSet;
+            search_tags.root = None;
+        }
+
+        active_model.update(self.repository.connection()).await?;
+
+        self.repository
+            .tokens(self.owner_id)
+            .reindex(id, search_tags)
+            .await?;
+
+        self.repository.by_id(file.id, file.user_id).await
+    }
+
+    /// Replace extra-source tags. Name and content sources are left alone.
+    ///
+    /// An editor cannot produce the owner's root tags, so their write drops
+    /// root and leaves that extra scope as the owner last wrote it. Empty
+    /// lists clear the scopes the caller is allowed to write — this endpoint
+    /// is a full replace of extra, not a partial merge.
+    pub(crate) async fn replace_extra(&self, id: Uuid, data: ExtraTokens) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+        let mut tags = data.into_search_tags()?;
+
+        if file.is_owner {
+            if tags.root.is_none() {
+                tags.root = Some(Vec::new());
+            }
+        } else {
+            tags.root = None;
+        }
+        if tags.file.is_none() {
+            tags.file = Some(Vec::new());
+        }
+
+        self.repository
+            .tokens(self.owner_id)
+            .replace_source(id, Source::Extra, tags)
+            .await?;
+
+        self.repository.by_id(file.id, file.user_id).await
+    }
+
+    /// Replace the note-body tags for a file, leaving every other source
+    /// alone.
+    ///
+    /// Written for the client's follow-up after a restore: that request names
+    /// a version and carries no body, so the tags for the text being restored
+    /// cannot be derived server-side and the restore clears them instead. A
+    /// client that has decrypted the restored version sends them here, and the
+    /// note is findable by its own words again without waiting for the sweep.
+    ///
+    /// Same scope asymmetry as every other index write: an editor who is not
+    /// the owner holds the file key but not the owner's root key, so their
+    /// call carries only the file scope and must leave the root scope alone
+    /// rather than empty an index it cannot rebuild.
+    pub(crate) async fn replace_content_tokens(
+        &self,
+        id: Uuid,
+        data: ContentTokens,
+    ) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+        let mut tags = data.into_search_tags()?;
+
+        if !file.is_owner {
+            tags.root = None;
+        }
+
+        self.repository
+            .tokens(self.owner_id)
+            .replace_source(id, Source::Content, tags)
+            .await?;
+
+        self.repository.by_id(file.id, file.user_id).await
+    }
+
+    /// Delete many files or directories for the owner. Each id in `ids`
+    /// must be one the caller owns; non-owner
+    /// ids are routed to [`Self::self_remove_recursive`] instead.
+    pub(crate) async fn delete_many(&self, ids: Vec<Uuid>) -> AppResult<Vec<AppFile>> {
+        let mut files = try_join_all(ids.into_iter().map(|id| self.file_tree(id)))
+            .await?
+            .into_iter()
+            .flatten()
+            .filter(|f| f.is_owner)
+            .collect::<Vec<AppFile>>();
+
+        // Sort files by id and then run dedup_by to remove all duplicates,
+        // without sorting, this won't remove all duplicates
+        files.sort_by_key(|a| a.id);
+        files.dedup_by(|a, b| a.id == b.id);
+
+        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+
+        files::Entity::delete_many()
+            .filter(files::Column::Id.is_in(ids))
+            .exec(self.repository.connection())
+            .await?;
+
+        Ok(files)
+    }
+
+    /// "Remove from my view" — drop the caller's `user_files` row for
+    /// each id and for every descendant in the case of folders, without
+    /// touching the file itself or any other recipient's row.
+    /// Reader/Editor/Co-owner DELETEs are routed here.
+    pub(crate) async fn self_remove_recursive(&self, ids: Vec<Uuid>) -> AppResult<()> {
+        // Collect every file_id the caller can see under each root,
+        // owner or non-owner. The cascade we want to drop is exactly
+        // the caller's user_files rows (`is_owner=false`) — owner-row
+        // self-deletes are nonsense (an owner's "delete" is the real
+        // delete handled above).
+        let mut all_ids: Vec<Uuid> = Vec::new();
+        for id in ids {
+            let subtree = self.subtree_ids(id).await?;
+            all_ids.extend(subtree);
+        }
+        all_ids.sort();
+        all_ids.dedup();
+
+        if all_ids.is_empty() {
+            return Ok(());
+        }
+
+        user_files::Entity::delete_many()
+            .filter(user_files::Column::UserId.eq(self.owner_id))
+            .filter(user_files::Column::IsOwner.eq(false))
+            .filter(user_files::Column::FileId.is_in(all_ids))
+            .exec(self.repository.connection())
+            .await?;
+        Ok(())
+    }
+
+    /// `file_tree(root)` but returning bare `file_id`s with no
+    /// ownership filter. Used by [`Self::self_remove_recursive`] which
+    /// only needs the id set.
+    pub(crate) async fn subtree_ids(&self, root_id: Uuid) -> AppResult<Vec<Uuid>> {
+        let sql = r#"
+            WITH RECURSIVE file_tree(id, file_id) AS (
+            SELECT id, file_id FROM files WHERE id = $1
+            UNION ALL
+            SELECT child.id, child.file_id FROM files child
+            JOIN file_tree parent ON parent.id = child.file_id
+            )
+            SELECT id FROM file_tree;
+        "#;
+        let rows = files::Entity::find()
+            .from_raw_sql(Statement::from_sql_and_values(
+                self.repository.connection().get_database_backend(),
+                sql,
+                [root_id.into()],
+            ))
+            .into_json()
+            .all(self.repository.connection())
+            .await?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(s) = row.get("id").and_then(|v| v.as_str()) {
+                if let Ok(id) = Uuid::from_str(s) {
+                    ids.push(id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Create a file entry in the database and set the owner with the
+    /// sent encrypted_key.
+    pub(crate) async fn create(
+        &self,
+        create_file: files::ActiveModel,
+        encrypted_key: &str,
+        search_tags: SearchTags,
+        content_tags: SearchTags,
+        digest_tags: DigestTags,
+    ) -> AppResult<AppFile> {
+        if let Some(file_id) = create_file.file_id.clone().into_value() {
+            if file_id.to_string().as_str() != "NULL" {
+                let parent = self.repository.by_id(file_id, self.owner_id).await?;
+
+                if !parent.is_owner || !parent.is_dir() {
+                    return Err(Error::BadRequest("parent_directory_not_found".to_string()));
+                }
+            }
+        }
+
+        let file_id = entity::active_value_to_uuid(create_file.id.clone())
+            .ok_or(Error::as_wrong_id("file"))?;
+
+        files::Entity::insert(create_file)
+            .exec_without_returning(self.repository.connection())
+            .await?;
+
+        let tokens = self.repository.tokens(self.owner_id);
+        tokens.reindex(file_id, search_tags).await?;
+        tokens
+            .replace_source(file_id, Source::Content, content_tags)
+            .await?;
+        tokens.replace_digests(file_id, digest_tags).await?;
+
+        let id = entity::Uuid::new_v4();
+
+        let user_file = user_files::ActiveModel {
+            id: ActiveValue::Set(id),
+            file_id: ActiveValue::Set(file_id),
+            user_id: ActiveValue::Set(self.owner_id),
+            is_owner: ActiveValue::Set(true),
+            encrypted_key: ActiveValue::Set(encrypted_key.to_string()),
+            created_at: ActiveValue::Set(Utc::now().timestamp()),
+            expires_at: ActiveValue::NotSet,
+            share_role: ActiveValue::Set("co-owner".to_string()),
+            shared_at: ActiveValue::NotSet,
+            shared_by_user_id: ActiveValue::NotSet,
+            member_signature: ActiveValue::NotSet,
+            member_signed_at: ActiveValue::NotSet,
+        };
+
+        user_files::Entity::insert(user_file)
+            .exec_without_returning(self.repository.connection())
+            .await?;
+
+        self.repository
+            .by_id(file_id, self.owner_id)
+            .await
+            .map(|f| f.is_new(true))
+    }
+
+    /// Update the content hashes of a file after upload completes.
+    /// Route gates by `permission::require_write` — Editors and
+    /// Co-owners can update hashes on shared files they just chunk-
+    /// uploaded.
+    pub(crate) async fn update_hashes(&self, id: Uuid, data: UpdateHashes) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+
+        if file.is_dir() {
+            return Err(Error::NotFound("file_not_found".to_string()));
+        }
+
+        let (active_model, mut tags) = data.into_active_model(id)?;
+
+        if !file.is_owner {
+            // Same guard as rename and replace_content: root-scope tags are
+            // keyed under the owner's key, which an editor does not hold. A
+            // value produced here would sit in the owner's scope unmatchable
+            // forever — and, worse, findable by the editor's own key.
+            tags.root = None;
+        }
+
+        active_model.update(self.repository.connection()).await?;
+
+        self.repository
+            .tokens(self.owner_id)
+            .replace_digests(id, tags)
+            .await?;
+
+        self.repository.by_id(file.id, file.user_id).await
+    }
+
+    /// Allocate a pending version and stage the in-flight upload metadata.
+    ///
+    /// **Does not touch chunks on disk** — the active version stays fully
+    /// readable for the duration of the edit. Once `chunks_stored ==
+    /// pending_chunks` the upload route fires [`Self::finish`], which
+    /// atomically swaps `active_version = pending_version`.
+    ///
+    /// Returns `(file, abandoned_pending)`:
+    /// - `file` is the post-update record for the response.
+    /// - `abandoned_pending` is `Some(N)` only when `force = true` was used
+    ///   to bypass an in-flight pending — the caller is responsible for
+    ///   purging that version's chunk directory after the DB commit.
+    ///
+    /// Errors:
+    /// - `Conflict("another_edit_is_in_progress")` if a pending exists and
+    ///   `force = false`. Surfaces as HTTP 409.
+    /// - `BadRequest("cannot_replace_directory")` for directories.
+    /// - `BadRequest("file_not_editable")` when the file is not flagged
+    ///   `editable`.
+    pub(crate) async fn replace_content(
+        &self,
+        id: Uuid,
+        mut data: ValidatedReplaceContent,
+    ) -> AppResult<(AppFile, Option<i32>)> {
+        // Caller may be the file's owner or an Editor / Co-owner on a
+        // share — the route layer gates with `permission::require_write`
+        // before reaching this method, so the `is_owner` check that used
+        // to live here is gone. Whether the row is owner or non-owner,
+        // the saver-attribution machinery in `finish` writes the
+        // caller's id into `file_versions.user_id`.
+        let file = self.repository.by_id(id, self.owner_id).await?;
+
+        if !file.is_owner {
+            // Root-scope tags are keyed under the owner's key, which an editor
+            // does not hold; theirs would overwrite the owner's index with
+            // unmatchable tags. Drop them and keep only the file-scope tags.
+            data.search_tags.root = None;
+        }
+
+        // A client from before the keyed index sends no tags at all, and
+        // `replace_source` leaves a scope it was given nothing for exactly as it
+        // was — so the note's text would change while its index went on
+        // describing the text it replaced. Searching would find the note by
+        // words it no longer contains and miss the words it now does, with
+        // nothing anywhere recording that.
+        //
+        // Both scopes absent, not either one. A caller that supplies a scope
+        // has told us what that scope should hold, and none of them is a
+        // legacy client: an owner sends both, an editor sends the file scope
+        // and has its root dropped just above, and a caller that supplies
+        // only root has still said something about the index. Only silence
+        // across the board is the old shape.
+        let index_is_stale = data.search_tags.root.is_none() && data.search_tags.file.is_none();
+
+        if file.is_dir() {
+            return Err(Error::BadRequest("cannot_replace_directory".to_string()));
+        }
+
+        if !file.editable {
+            return Err(Error::BadRequest("file_not_editable".to_string()));
+        }
+
+        // Concurrent-edit guard. The client opts into recovery via
+        // `force = true`, abandoning the previous pending edit.
+        let abandoned_pending = if let Some(pending) = file.pending_version {
+            if !data.force {
+                return Err(Error::Conflict("another_edit_is_in_progress".to_string()));
+            }
+            Some(pending)
+        } else {
+            None
+        };
+
+        // Allocate the next pending version. With `force`, take a slot
+        // strictly above any abandoned pending so straggler chunk uploads
+        // from the dying client can never accidentally land in the new
+        // pending dir.
+        let next = std::cmp::max(file.active_version, abandoned_pending.unwrap_or(0)) + 1;
+        let now = Utc::now().timestamp();
+
+        let mut active_model = files::ActiveModel {
+            id: ActiveValue::Set(id),
+            pending_version: ActiveValue::Set(Some(next)),
+            pending_chunks: ActiveValue::Set(Some(data.chunks)),
+            pending_size: ActiveValue::Set(Some(data.size)),
+            chunks_stored: ActiveValue::Set(Some(0)),
+            file_modified_at: ActiveValue::Set(now),
+            ..Default::default()
+        };
+
+        // Metadata-only updates swap in immediately — they don't affect
+        // chunk decryption, so concurrent readers seeing the new name with
+        // the old content for a few seconds is harmless.
+        if let Some(name) = data.encrypted_name {
+            active_model.encrypted_name = ActiveValue::Set(name);
+        }
+        if let Some(thumbnail) = data.encrypted_thumbnail {
+            active_model.encrypted_thumbnail = ActiveValue::Set(Some(thumbnail));
+        }
+
+        if index_is_stale {
+            // What the rekey migration uses to mean "this file is waiting for
+            // its owner's sweep". The sweep decrypts the note and rebuilds
+            // name and body together, so enrolling it here is the whole
+            // repair: it happens on the owner's next login from a client that
+            // can produce the tags.
+            active_model.name_hash = ActiveValue::Set(String::new());
+        }
+
+        active_model.update(self.repository.connection()).await?;
+
+        // An empty set is a delete with nothing written after it, so a stale
+        // scope is cleared rather than left answering for content that is
+        // gone. Only the scopes this caller was entitled to write: the
+        // root-drop above already removed root for a non-owner, whose save
+        // must not clear an index they cannot rebuild.
+        let tags = if index_is_stale {
+            SearchTags {
+                root: file.is_owner.then(Vec::new),
+                file: Some(Vec::new()),
+            }
+        } else {
+            data.search_tags
+        };
+
+        self.repository
+            .tokens(self.owner_id)
+            .replace_source(id, Source::Content, tags)
+            .await?;
+
+        if index_is_stale {
+            // The digest scopes need the same treatment, and cannot be
+            // rebuilt by the sweep the way the word tags can: `finish` nulls
+            // the digest columns on the way through, expecting the hash write
+            // that an old client is refused. So the sweep finds nothing to
+            // re-key, sends no digest tags, and the ones describing the
+            // replaced content would outlive it — past the sweep, which takes
+            // the file off the pending list either way.
+            self.repository
+                .tokens(self.owner_id)
+                .replace_digests(
+                    id,
+                    DigestTags {
+                        root: file.is_owner.then(Vec::new),
+                        file: Some(Vec::new()),
+                    },
+                )
+                .await?;
+        }
+
+        let file = self.repository.by_id(id, self.owner_id).await?;
+        Ok((file, abandoned_pending))
+    }
+
+    /// Toggle the `editable` flag on an existing file.
+    /// Only the owner can convert a regular file into an editable note (or back).
+    /// Directories are rejected — `editable` is a file-level concept.
+    ///
+    /// The flag drives chunk-layout routing (see `AppFile::use_versioned_layout`),
+    /// so a flip mid-edit or after history accumulates would orphan chunks.
+    /// Two guards block that:
+    ///
+    /// - Flipping while `pending_version.is_some()` — rejected, because
+    ///   the in-flight edit is targeting the versioned path; switching
+    ///   mid-stream would strand its chunks.
+    /// - Flipping `editable → false` while history exists (either
+    ///   `active_version > 1` or any `file_versions` row) — rejected,
+    ///   because the versioned directories would become unreachable
+    ///   through the legacy read path. Deleting the file is the only way
+    ///   to go back.
+    ///
+    /// Going `non-editable → editable` on a file with only legacy chunks
+    /// is allowed with no disk I/O here. The first subsequent edit snapshots
+    /// the legacy chunks as v1 and lands the new content in v2 via the
+    /// existing `copy_version` fallback.
+    pub(crate) async fn set_editable(&self, id: Uuid, data: SetEditable) -> AppResult<AppFile> {
+        let file = self.repository.by_id(id, self.owner_id).await?;
+
+        if !file.is_owner || file.user_id != self.owner_id {
+            return Err(Error::NotFound("file_not_found".to_string()));
+        }
+
+        if file.is_dir() {
+            return Err(Error::BadRequest(
+                "cannot_set_editable_on_directory".to_string(),
+            ));
+        }
+
+        let validated = data.validate()?;
+        let next_editable = validated.editable.unwrap();
+
+        if next_editable != file.editable && file.has_pending_upload() {
+            return Err(Error::Conflict(
+                "cannot_change_editable_during_edit".to_string(),
+            ));
+        }
+
+        if file.editable && !next_editable {
+            let has_history = file.active_version > 1
+                || file_versions::Entity::find()
+                    .filter(file_versions::Column::FileId.eq(id))
+                    .one(self.repository.connection())
+                    .await?
+                    .is_some();
+            if has_history {
+                return Err(Error::Conflict(
+                    "cannot_disable_editable_with_history".to_string(),
+                ));
+            }
+        }
+
+        files::ActiveModel {
+            id: ActiveValue::Set(id),
+            editable: ActiveValue::Set(next_editable),
+            ..Default::default()
+        }
+        .update(self.repository.connection())
+        .await?;
+
+        self.repository.by_id(id, self.owner_id).await
+    }
+
+    /// Commit either an initial upload or an edit. Auto-fired by the
+    /// upload route once `chunks_stored` matches the target chunk count.
+    ///
+    /// **Initial upload** (`pending_version` is None): just sets
+    /// `finished_upload_at`. No `file_versions` row is created — the
+    /// first-ever content has no historical predecessor to snapshot.
+    ///
+    /// **Edit** (`pending_version` is Some): inserts a `file_versions`
+    /// row for the outgoing active version, then atomically swaps the
+    /// pointer. The `(file_id, version)` unique index makes the snapshot
+    /// idempotent — a retried last chunk that double-fires `finish`
+    /// errors out cleanly instead of flipping pointers twice.
+    ///
+    /// After the swap, prunes history over `max_file_versions` and
+    /// returns the version numbers that were dropped from the database.
+    /// The caller is expected to wipe their on-disk directories
+    /// (`fs.purge_version`) post-commit; failures there are best-effort.
+    ///
+    /// Caller is expected to wrap this in a DB transaction so snapshot,
+    /// swap, and prune commit together — the upload route does that.
+    pub(crate) async fn finish(
+        &self,
+        file: &AppFile,
+        max_file_versions: usize,
+    ) -> AppResult<(AppFile, Vec<i32>)> {
+        // Caller must hold a `user_files` row for this file. Whether
+        // they're owner or non-owner is up to the route gate; here we
+        // just need a way to load the file and a non-directory target.
+        if file.user_id != self.owner_id || file.is_dir() {
+            return Err(Error::NotFound("file_not_found".to_string()));
+        }
+
+        let now = Utc::now().timestamp();
+        let conn = self.repository.connection();
+
+        if let Some(pending) = file.pending_version {
+            // Snapshot the outgoing active version into history.
+            let snapshot = file_versions::ActiveModel {
+                id: ActiveValue::Set(Uuid::new_v4()),
+                file_id: ActiveValue::Set(file.id),
+                version: ActiveValue::Set(file.active_version),
+                user_id: ActiveValue::Set(Some(self.owner_id)),
+                is_anonymous: ActiveValue::Set(false),
+                size: ActiveValue::Set(file.size.unwrap_or(0)),
+                chunks: ActiveValue::Set(file.chunks.unwrap_or(0)),
+                sha256: ActiveValue::Set(file.sha256.clone()),
+                created_at: ActiveValue::Set(now),
+            };
+            file_versions::Entity::insert(snapshot)
+                .exec_without_returning(conn)
+                .await?;
+
+            let new_chunks = file
+                .pending_chunks
+                .ok_or_else(|| Error::BadRequest("pending_chunks_not_set".to_string()))?;
+            let new_size = file
+                .pending_size
+                .ok_or_else(|| Error::BadRequest("pending_size_not_set".to_string()))?;
+
+            // Atomic pointer swap. Hashes go to NULL — `update_hashes`
+            // immediately after this fills them for the new active version.
+            files::ActiveModel {
+                id: ActiveValue::Set(file.id),
+                active_version: ActiveValue::Set(pending),
+                pending_version: ActiveValue::Set(None),
+                pending_chunks: ActiveValue::Set(None),
+                pending_size: ActiveValue::Set(None),
+                chunks: ActiveValue::Set(Some(new_chunks)),
+                size: ActiveValue::Set(Some(new_size)),
+                chunks_stored: ActiveValue::Set(Some(new_chunks)),
+                md5: ActiveValue::Set(None),
+                sha1: ActiveValue::Set(None),
+                sha256: ActiveValue::Set(None),
+                blake2b: ActiveValue::Set(None),
+                finished_upload_at: ActiveValue::Set(Some(now)),
+                ..Default::default()
+            }
+            .update(conn)
+            .await?;
+        } else {
+            // Brand-new file's first commit. No swap, no history row.
+            let chunks = file
+                .chunks
+                .ok_or_else(|| Error::BadRequest("file_has_no_chunks".to_string()))?;
+
+            files::ActiveModel {
+                id: ActiveValue::Set(file.id),
+                chunks_stored: ActiveValue::Set(Some(chunks)),
+                finished_upload_at: ActiveValue::Set(Some(now)),
+                ..Default::default()
+            }
+            .update(conn)
+            .await?;
+        }
+
+        // Prune oldest history beyond the cap. Inside the same transaction
+        // so a partial prune can never escape — either we drop these rows
+        // and the swap commits, or both roll back.
+        let pruned = self
+            .repository
+            .versions(self.owner_id)
+            .prune_over_cap(file.id, max_file_versions)
+            .await?;
+
+        let updated = self.repository.by_id(file.id, file.user_id).await?;
+        Ok((updated, pruned))
+    }
+}

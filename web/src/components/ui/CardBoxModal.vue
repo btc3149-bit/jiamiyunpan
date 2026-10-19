@@ -1,0 +1,119 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { mdiClose } from '@mdi/js'
+import { useFocusTrap } from '@/composables/useFocusTrap'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseButtons from '@/components/ui/BaseButtons.vue'
+import CardBox from '@/components/ui/CardBox.vue'
+import OverlayLayer from '@/components/ui/OverlayLayer.vue'
+import CardBoxComponentTitle from '@/components/ui/CardBoxComponentTitle.vue'
+import type { ColorType } from '@/colors'
+import type { FormType } from '../form'
+
+const props = defineProps<{
+  title?: string
+  button?: ColorType
+  buttonLabel?: string
+  hasCancel?: boolean
+  hasClose?: boolean
+  hideSubmit?: boolean
+  /** Holds the confirm button shut until the caller's own gate is satisfied. */
+  confirmDisabled?: boolean
+  modelValue: boolean | undefined
+  form?: FormType
+}>()
+
+const emit = defineEmits(['update:modelValue', 'cancel', 'confirm'])
+
+const value = computed({
+  get: () => props.modelValue,
+  set: (value) => emit('update:modelValue', value)
+})
+
+const card = ref()
+const cardEl = computed<HTMLElement | null>(() => card.value?.$el ?? null)
+const isOpen = computed(() => !!props.modelValue)
+
+useFocusTrap(cardEl, isOpen)
+
+const confirm = async () => {
+  if (props.confirmDisabled) return
+  if (!props.form) {
+    value.value = false
+    emit('confirm')
+  }
+}
+
+const cancel = () => {
+  if (props.form) {
+    props.form.handleReset()
+  }
+
+  value.value = false
+  emit('cancel')
+}
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape' && value.value) {
+    cancel()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+</script>
+
+<template>
+  <OverlayLayer :visible="value" @overlay-click="cancel">
+    <CardBox
+      v-show="value"
+      ref="card"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="title"
+      tabindex="-1"
+      class="relative max-h-modal w-11/12 md:w-3/5 lg:w-2/5 xl:w-4/12 z-50 focus:outline-none"
+      is-modal
+      has-component-layout
+    >
+      <!-- relative: lets a modal's own content render a full-cover overlay (e.g. the share submit blur) -->
+      <div class="relative flex-1 min-h-0 overflow-y-auto p-4">
+        <CardBoxComponentTitle v-if="title" :title="title">
+          <BaseButton
+            v-if="hasCancel || hasClose"
+            :icon="mdiClose"
+            :title="$t('common.close')"
+            :aria-label="$t('common.close')"
+            color="dark"
+            small
+            rounded-full
+            @click.prevent="cancel"
+          />
+        </CardBoxComponentTitle>
+        <slot />
+      </div>
+
+      <footer v-if="!hideSubmit || hasCancel" class="p-6">
+        <BaseButtons>
+          <slot name="buttons">
+            <BaseButton
+              v-if="!hideSubmit"
+              :label="buttonLabel"
+              :color="button || 'info'"
+              :disabled="confirmDisabled || form?.isSubmitting.value"
+              @click="confirm"
+              type="submit"
+              @keyup.enter="confirm()"
+            />
+            <BaseButton
+              v-if="hasCancel"
+              :label="$t('common.cancel')"
+              color="light"
+              @click="cancel"
+            />
+          </slot>
+        </BaseButtons>
+      </footer>
+    </CardBox>
+  </OverlayLayer>
+</template>

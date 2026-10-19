@@ -1,0 +1,229 @@
+import type { AppLink, AppFile } from 'types'
+type NonFunctionPropertyNames<T> = { [K in keyof T]: T[K] extends Function ? never : K }[keyof T]
+export type ConstructPreview<T> = Pick<T, NonFunctionPropertyNames<T>>
+
+/**
+ * Check if the file or link is previewable
+ */
+export function isPreviewable(item: AppFile | AppLink): boolean {
+  if ((item as AppLink).file_mime) {
+    return isLinkPreviewable(item as AppLink)
+  }
+
+  return isFilePreviewable(item as AppFile)
+}
+
+/**
+ * Helper to check if the file is previewable
+ */
+function isFilePreviewable(item: AppFile): boolean {
+  // A file whose chunks never landed has nothing to decrypt — the server
+  // answers with an error body and the cipher chokes on it.
+  if (!item.finished_upload_at) {
+    return false
+  }
+
+  return hasPreviewableContent(item)
+}
+
+/**
+ * The mime/size half of the check, run against [[Preview]] instances too —
+ * they carry the same shape but none of the file row's upload state.
+ */
+function hasPreviewableContent(item: {
+  size?: number
+  mime: string
+  thumbnail?: string
+  has_thumbnail?: boolean
+}): boolean {
+  return (
+    !!item.size &&
+    item.size > 0 &&
+    (item.thumbnail !== undefined ||
+      item.has_thumbnail === true ||
+      item.mime === 'application/pdf' ||
+      item.mime === 'text/markdown' ||
+      item.mime === 'text/x-markdown' ||
+      item.mime.startsWith('image/') ||
+      item.mime.startsWith('video/'))
+  )
+}
+
+/**
+ * Check if a file is a markdown file by mime type or extension
+ */
+export function isMarkdownFile(item: AppFile): boolean {
+  return (
+    item.mime === 'text/markdown' ||
+    item.mime === 'text/x-markdown' ||
+    item.name.toLowerCase().endsWith('.md')
+  )
+}
+
+/**
+ * Helper to check if the link is previewable
+ */
+function isLinkPreviewable(item: AppLink): boolean {
+  return (
+    !!item.file_size &&
+    item.file_size > 0 &&
+    (item.thumbnail !== undefined ||
+      item.has_thumbnail === true ||
+      item.file_mime === 'application/pdf')
+  )
+}
+
+/**
+ * Base class for previews, contains common properties
+ * used for preview of any type of inner file definition (file or link).
+ * It also exposes static methods for creating previews from file or link.
+ *
+ * Each link, or file preview exposes inner functions that provide the actual
+ * data for the preview and other actions that can be called on each respectively.
+ *
+ * @abstract
+ */
+export abstract class Preview {
+  public id: string
+  public parentId?: string
+  public name: string
+  public mime: string
+  public size: number | undefined
+  public thumbnail?: string
+  public editable: boolean
+
+  constructor(data: Omit<ConstructPreview<Preview>, 'chunks'>) {
+    this.id = data.id
+    this.name = data.name
+    this.mime = data.mime
+    this.size = data.size
+    this.parentId = data.parentId
+    this.thumbnail = data.thumbnail
+    this.editable = !!data.editable
+  }
+
+  /**
+   * Get the items that are in the same directory
+   * as the main preview file (if applicable)
+   */
+  public async loadItems(): Promise<void> {
+    return
+  }
+
+  /**
+   * Get total number of items in the same directory
+   */
+  public getTotal(): number {
+    return 0
+  }
+
+  /**
+   * Get index of the current preview item in the list of other
+   * items from the same directory
+   */
+  public getIndex(): number {
+    return -1
+  }
+
+  /**
+   * Get the id of previous item
+   */
+  public getPreviousId(): string | undefined {
+    return undefined
+  }
+
+  /**
+   * Get the id of next item
+   */
+  public getNextId(): string | undefined {
+    return undefined
+  }
+
+  /**
+   * Load the data for the preview.
+   *
+   * `onBytes` receives the cumulative received byte count as the content
+   * streams in, so large files can show movement instead of a bare spinner.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public async load(onBytes?: (bytes: number) => void): Promise<Uint8Array> {
+    return new Uint8Array()
+  }
+
+  /**
+   * Thumbnail to hold the frame while the full asset downloads.
+   *
+   * Subclasses that can source one lazily override this; the base just
+   * hands back whatever was passed in at construction.
+   */
+  public async loadThumbnail(): Promise<string | undefined> {
+    return this.thumbnail
+  }
+
+  /**
+   * Number of encrypted chunks (used for progressive video loading).
+   * Overridden by FilePreview; returns undefined for previews without per-chunk access.
+   */
+  public get chunks(): number | undefined {
+    return undefined
+  }
+
+  /**
+   * Download and decrypt a single chunk by index.
+   * Overridden by FilePreview; base implementation returns empty bytes.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public async loadChunk(_: number, _signal?: AbortSignal): Promise<Uint8Array> {
+    return new Uint8Array()
+  }
+
+  /**
+   * Easily match the preview type
+   */
+  public previewType(): 'image' | 'pdf' | 'video' | 'markdown' | null {
+    if (this.isImage()) return 'image'
+    if (this.isPdf()) return 'pdf'
+    if (this.isVideo()) return 'video'
+    if (this.isMarkdown()) return 'markdown'
+    return null
+  }
+
+  /**
+   * Lets us know if the wrapped file can have a preview at all
+   */
+  public is(): boolean {
+    return hasPreviewableContent(this)
+  }
+
+  /**
+   * Lets us know if the preview is an image
+   */
+  public isImage(): boolean {
+    return this.is() && this.mime.startsWith('image/')
+  }
+
+  /**
+   * Lets us know if the preview is a pdf file
+   */
+  public isPdf(): boolean {
+    return this.is() && this.mime === 'application/pdf'
+  }
+
+  /**
+   * Lets us know if the preview is a video
+   */
+  public isVideo(): boolean {
+    return this.is() && this.mime.startsWith('video/')
+  }
+
+  /**
+   * Lets us know if the preview is a markdown file
+   */
+  public isMarkdown(): boolean {
+    return (
+      this.mime === 'text/markdown' ||
+      this.mime === 'text/x-markdown' ||
+      this.name.toLowerCase().endsWith('.md')
+    )
+  }
+}

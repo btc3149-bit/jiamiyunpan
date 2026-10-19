@@ -1,0 +1,561 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+/**
+ * save.ts exercises the happy path (replaceContent → transfer-token →
+ * chunked upload) and two error paths (409 → SaveConflictError, any
+ * other failure → bubbles up). We mock the IO surface — Api, meta,
+ * cryptfns, uploadChunk — so the tests run as pure logic without a
+ * network or a WASM runtime.
+ *
+ * Vitest 0.30 doesn't have `vi.hoisted`, so the factories below create
+ * their own `vi.fn()`s and we retrieve them via dynamic import afterwards.
+ */
+
+vi.mock('../services/api', () => {
+  class ErrorResponse extends Error {
+    status: number
+    body: unknown
+    constructor(status: number, body?: unknown) {
+      super(`status ${status}`)
+      this.status = status
+      this.body = body
+      this.name = 'ErrorResponse'
+    }
+  }
+  const put = vi.fn()
+  return {
+    default: class {
+      constructor() {}
+      toJson() {
+        return {}
+      }
+      static put = put
+    },
+    ErrorResponse
+  }
+})
+
+vi.mock('../services/storage/meta', () => ({
+  requestTransferToken: vi.fn(() => Promise.resolve({ token: 'transfer-token' })),
+  updateHashes: vi.fn(() => Promise.resolve(undefined)),
+  create: vi.fn((_kp: unknown, input: { name: string; mime: string; editable?: boolean }) =>
+    Promise.resolve({
+      id: 'created-file-id',
+      name: input.name,
+      mime: input.mime,
+      editable: !!input.editable,
+      chunks: 1,
+      size: 42,
+      key: new Uint8Array(32)
+    })
+  ),
+  get: vi.fn(() => Promise.reject(new Error('parent_directory_not_found')))
+}))
+
+vi.mock('../services/shares/editable', () => ({
+  uploadIntoSharedFolder: vi.fn(() => Promise.resolve({ file_id: 'shared-file-id' }))
+}))
+
+vi.mock('../services/shares', () => ({
+  trustedFingerprintsStore: () => ({})
+}))
+
+vi.mock('../services', () => ({
+  uuidv4: () => 'shared-file-id',
+  utcStringFromLocal: (d: Date) => d.toISOString()
+}))
+
+vi.mock('../services/cryptfns', () => ({
+  searchTags: vi.fn(() => ['tok-a', 'tok-b']),
+  searchTag: vi.fn(() => 'name-hash'),
+  searchRootKey: vi.fn(() => 'root-key'),
+  searchFileKey: vi.fn(() => 'file-key'),
+  sha256: { digest: vi.fn(() => 'name-hash') },
+  cipher: {
+    defaultCipher: vi.fn(() => 'aegis-128l'),
+    generateKey: vi.fn(() => Promise.resolve(new Uint8Array(32))),
+    encryptString: vi.fn(() => Promise.resolve('cipher-blob'))
+  },
+  uint8: {
+    toHex: vi.fn(() => 'deadbeef')
+  }
+}))
+
+vi.mock('../services/storage/upload/sync', () => ({
+  uploadChunk: vi.fn(() => Promise.resolve(undefined))
+}))
+
+vi.mock('../services/constants', () => ({
+  CHUNK_SIZE_BYTES: 1_048_576
+}))
+
+import {
+  replaceContent,
+  saveFileContent,
+  createNote,
+  createDirInSharedFolder,
+  needsMultikeyCreate,
+  SaveConflictError
+} from '../services/storage/save'
+import Api, { ErrorResponse } from '../services/api'
+import { requestTransferToken, create as metaCreate, get as metaGet } from '../services/storage/meta'
+import { uploadIntoSharedFolder } from '../services/shares/editable'
+import { uploadChunk } from '../services/storage/upload/sync'
+import { searchTags } from '../services/cryptfns'
+import type { AppFile, KeyPair } from 'types'
+
+/** cryptfns is mocked above, so this only has to be non-empty. */
+const keypair = { input: 'private-key', publicKey: 'public-key' } as unknown as KeyPair
+
+const ApiPutMock = (Api as unknown as { put: ReturnType<typeof vi.fn> }).put
+
+function makeAppFile(partial: Partial<AppFile> = {}): AppFile {
+  return {
+    id: 'file-1',
+    user_id: 'u1',
+    is_owner: true,
+    name_hash: 'h',
+    name: 'note.md',
+    mime: 'text/markdown',
+    size: 10,
+    chunks: 1,
+    encrypted_key: '',
+    encrypted_name: '',
+    cipher: 'aegis-128l',
+    editable: true,
+    active_version: 1,
+    file_modified_at: 0,
+    created_at: 0,
+    is_new: false,
+    key: new Uint8Array(32),
+    ...partial
+  } as AppFile
+}
+
+describe('replaceContent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('UNIT: PUTs /api/storage/{id}/content and returns the updated file', async () => {
+    const updated = makeAppFile({ id: 'file-1', active_version: 2 })
+    ApiPutMock.mockResolvedValueOnce({ body: updated })
+
+    const result = await replaceContent('file-1', {
+      size: 10,
+      chunks: 1,
+      search_tokens_root: ['a']
+    })
+
+    expect(ApiPutMock).toHaveBeenCalledTimes(1)
+    expect(ApiPutMock).toHaveBeenCalledWith(
+      '/api/storage/file-1/content',
+      undefined,
+      { size: 10, chunks: 1, search_tokens_root: ['a'] }
+    )
+    expect(result.id).toBe('file-1')
+    expect(result.active_version).toBe(2)
+  })
+
+  it('UNIT: throws when the server returns an empty body', async () => {
+    ApiPutMock.mockResolvedValueOnce({ body: undefined })
+    await expect(replaceContent('file-1', { size: 1, chunks: 1 })).rejects.toThrow(
+      'Failed to replace file content'
+    )
+  })
+
+  it('UNIT: forwards the `force` flag verbatim', async () => {
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+    await replaceContent('file-1', { size: 1, chunks: 1, force: true })
+    expect(ApiPutMock).toHaveBeenCalledWith(
+      '/api/storage/file-1/content',
+      undefined,
+      expect.objectContaining({ force: true })
+    )
+  })
+})
+
+describe('saveFileContent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('UNIT: rejects without a file key', async () => {
+    const file = makeAppFile({ key: undefined })
+    await expect(saveFileContent(file, 'hello', keypair)).rejects.toThrow('File key is required')
+  })
+
+  it('UNIT: orchestrates replaceContent → transfer-token → uploadChunk', async () => {
+    const file = makeAppFile()
+    const updated = makeAppFile({ active_version: 2 })
+    ApiPutMock.mockResolvedValueOnce({ body: updated })
+
+    const out = await saveFileContent(file, '# hello world', keypair)
+
+    expect(ApiPutMock).toHaveBeenCalledTimes(1)
+    expect(requestTransferToken).toHaveBeenCalledWith(file.id, 'upload')
+    expect(uploadChunk).toHaveBeenCalledTimes(1)
+    // saveFileContent preserves the unencrypted metadata from the caller's
+    // file (key, name, thumbnail) on the returned AppFile.
+    expect(out.key).toBe(file.key)
+    expect(out.name).toBe(file.name)
+    expect(out.active_version).toBe(2)
+  })
+
+  it('UNIT: pads empty content with a space so backend size >= 1', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+
+    await saveFileContent(file, '', keypair)
+
+    const [, , body] = ApiPutMock.mock.calls[0]
+    expect(body.size).toBe(1)
+    expect(body.chunks).toBe(1)
+  })
+
+  it('UNIT: computes chunk count for multi-chunk content', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+
+    // CHUNK_SIZE_BYTES = 1_048_576 (mock). 3 MiB of ASCII ends up in 3 chunks.
+    const big = 'x'.repeat(1_048_576 * 3)
+    await saveFileContent(file, big)
+
+    const [, , body] = ApiPutMock.mock.calls[0]
+    expect(body.chunks).toBe(3)
+    expect(body.size).toBe(1_048_576 * 3)
+    expect(uploadChunk).toHaveBeenCalledTimes(3)
+  })
+
+  it('UNIT: indexes the note by its body, not its title', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+
+    await saveFileContent(file, 'zanzibar', keypair)
+
+    expect(searchTags).toHaveBeenCalledWith(expect.anything(), 'zanzibar')
+    expect(searchTags).not.toHaveBeenCalledWith(expect.anything(), 'note.md\nzanzibar')
+    const [, , body] = ApiPutMock.mock.calls[0]
+    expect(body.search_tokens_root).toEqual(['tok-a', 'tok-b'])
+    expect(body.search_tokens_file).toEqual(['tok-a', 'tok-b'])
+    expect(JSON.stringify(body)).not.toContain('zanzibar')
+  })
+
+  it('UNIT: 409 from the server becomes a SaveConflictError carrying the draft content', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockRejectedValueOnce(new ErrorResponse(409))
+
+    try {
+      await saveFileContent(file, 'my draft content', keypair)
+      throw new Error('expected a SaveConflictError')
+    } catch (err) {
+      expect(err).toBeInstanceOf(SaveConflictError)
+      const conflict = err as SaveConflictError
+      expect(conflict.fileId).toBe(file.id)
+      expect(conflict.originalContent).toBe('my draft content')
+    }
+
+    // A 409 means nothing was written: neither transfer-token nor upload
+    // should have been requested.
+    expect(requestTransferToken).not.toHaveBeenCalled()
+    expect(uploadChunk).not.toHaveBeenCalled()
+  })
+
+  it('UNIT: non-409 ErrorResponse is re-thrown verbatim (not wrapped)', async () => {
+    const file = makeAppFile()
+    const err = new ErrorResponse(500)
+    ApiPutMock.mockRejectedValueOnce(err)
+
+    await expect(saveFileContent(file, 'content', keypair)).rejects.toBe(err)
+  })
+
+  it('UNIT: forwards force=true to replaceContent', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+
+    await saveFileContent(file, 'content', keypair, true)
+
+    const [, , body] = ApiPutMock.mock.calls[0]
+    expect(body.force).toBe(true)
+  })
+
+  it('UNIT: defaults force to false when omitted', async () => {
+    const file = makeAppFile()
+    ApiPutMock.mockResolvedValueOnce({ body: makeAppFile() })
+
+    await saveFileContent(file, 'content', keypair)
+
+    const [, , body] = ApiPutMock.mock.calls[0]
+    expect(body.force).toBe(false)
+  })
+})
+
+describe('createNote', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function makeKeypair(): KeyPair {
+    return {
+      publicKey: 'pub',
+      input: 'priv',
+      fingerprint: 'fp'
+    } as KeyPair
+  }
+
+  it('UNIT: appends .md when missing and defaults folderId to undefined', async () => {
+    await createNote(makeKeypair(), 'shopping-list')
+
+    expect(metaCreate).toHaveBeenCalledTimes(1)
+    const [, data] = (metaCreate as unknown as { mock: { calls: unknown[][] } }).mock.calls[0] as [
+      unknown,
+      { name: string; mime: string; editable: boolean; chunks: number; file_id?: string; content?: string }
+    ]
+    expect(data.name).toBe('shopping-list.md')
+    expect(data.mime).toBe('text/markdown')
+    expect(data.editable).toBe(true)
+    expect(data.chunks).toBe(1)
+    expect(data.file_id).toBeUndefined()
+    expect(data.content).toBe('# shopping-list\n')
+  })
+
+  it('UNIT: keeps an existing .md suffix without doubling it', async () => {
+    await createNote(makeKeypair(), 'notes.md')
+    const [, data] = (metaCreate as unknown as { mock: { calls: unknown[][] } }).mock.calls[0] as [
+      unknown,
+      { name: string }
+    ]
+    expect(data.name).toBe('notes.md')
+  })
+
+  it('UNIT: uploads the initial chunk with the created file metadata', async () => {
+    await createNote(makeKeypair(), 'hello')
+
+    expect(requestTransferToken).toHaveBeenCalledWith('created-file-id', 'upload')
+    expect(uploadChunk).toHaveBeenCalledTimes(1)
+    const [uploadFile, chunkBytes, chunkIndex] = (
+      uploadChunk as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls[0] as [{ temporaryId: string; file: File }, Uint8Array, number]
+    expect(uploadFile.temporaryId).toBe('created-file-id')
+    expect(uploadFile.file).toBeInstanceOf(File)
+    expect(chunkIndex).toBe(0)
+    expect(chunkBytes.length).toBeGreaterThan(0)
+  })
+
+  it('UNIT: passes folderId through when provided', async () => {
+    await createNote(makeKeypair(), 'note', 'folder-uuid')
+    const [, data] = (metaCreate as unknown as { mock: { calls: unknown[][] } }).mock.calls[0] as [
+      unknown,
+      { file_id?: string }
+    ]
+    expect(data.file_id).toBe('folder-uuid')
+  })
+
+  it('UNIT: initial content is a heading derived from the note name', async () => {
+    await createNote(makeKeypair(), 'shopping-list')
+    const [, chunkBytes] = (uploadChunk as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0] as [unknown, Uint8Array]
+    const decoded = new TextDecoder().decode(chunkBytes)
+    expect(decoded).toBe('# shopping-list\n')
+  })
+})
+
+describe('needsMultikeyCreate', () => {
+  // The owner-only `POST /api/storage` rejects every non-owner parent
+  // ("parent_directory_not_found"). The flag below tells the create path
+  // to fan keys out via the multi-key endpoint instead.
+  it('UNIT: true for a folder the caller does not own', () => {
+    expect(
+      needsMultikeyCreate({ mime: 'dir', is_owner: false } as unknown as AppFile)
+    ).toBe(true)
+  })
+
+  it('UNIT: true for an owned folder that already has a signed member list', () => {
+    expect(
+      needsMultikeyCreate({
+        mime: 'dir',
+        is_owner: true,
+        members_signed_at: 1_700_000_000
+      } as unknown as AppFile)
+    ).toBe(true)
+  })
+
+  it('UNIT: false for a private owned folder', () => {
+    expect(
+      needsMultikeyCreate({ mime: 'dir', is_owner: true } as unknown as AppFile)
+    ).toBe(false)
+  })
+
+  it('UNIT: false for null or non-directory parents', () => {
+    expect(needsMultikeyCreate(null)).toBe(false)
+    expect(needsMultikeyCreate(undefined)).toBe(false)
+    expect(
+      needsMultikeyCreate({ mime: 'text/plain', is_owner: false } as unknown as AppFile)
+    ).toBe(false)
+  })
+})
+
+describe('createNote into a shared folder', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function makeKeypair(): KeyPair {
+    return {
+      publicKey: 'pub',
+      input: 'priv',
+      fingerprint: 'fp'
+    } as KeyPair
+  }
+
+  it('UNIT: routes through uploadIntoSharedFolder when parent is a shared folder', async () => {
+    const parent = {
+      id: 'folder-id',
+      mime: 'dir',
+      is_owner: false,
+      share_role: 'editor'
+    } as unknown as AppFile
+    ;(metaGet as unknown as { mockResolvedValueOnce: (v: AppFile) => void }).mockResolvedValueOnce(
+      parent
+    )
+    ;(metaGet as unknown as { mockResolvedValueOnce: (v: AppFile) => void }).mockResolvedValueOnce({
+      ...parent,
+      id: 'shared-file-id',
+      name: 'note.md'
+    } as unknown as AppFile)
+
+    await createNote(makeKeypair(), 'note', parent, 'caller-id')
+
+    expect(uploadIntoSharedFolder).toHaveBeenCalledTimes(1)
+    const uploadArgs = (
+      uploadIntoSharedFolder as unknown as { mock: { calls: { payload: Record<string, unknown> }[][] } }
+    ).mock.calls[0][0]
+    expect(uploadArgs.payload.searchTokensRoot).toEqual(['tok-a', 'tok-b'])
+    expect(uploadArgs.payload.contentTokensRoot).toEqual(['tok-a', 'tok-b'])
+    expect(searchTags).toHaveBeenCalledWith(expect.anything(), 'note.md')
+    expect(searchTags).toHaveBeenCalledWith(expect.anything(), '# note\n')
+    // Regular create must not fire — that would 400 with the
+    // owner-only parent check.
+    expect(metaCreate).not.toHaveBeenCalled()
+    expect(requestTransferToken).toHaveBeenCalledWith('shared-file-id', 'upload')
+    expect(uploadChunk).toHaveBeenCalledTimes(1)
+  })
+
+  it('UNIT: routes through regular create for an owned parent', async () => {
+    const parent = {
+      id: 'folder-id',
+      mime: 'dir',
+      is_owner: true
+    } as unknown as AppFile
+
+    await createNote(makeKeypair(), 'note', parent, 'caller-id')
+
+    expect(uploadIntoSharedFolder).not.toHaveBeenCalled()
+    expect(metaCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('UNIT: a resolved roster routes an owned unsigned parent through multi-key', async () => {
+    // A directory below the share root is owned by its creator and has no
+    // signed list of its own — the caller-resolved roster id is the only
+    // signal that the note belongs to a shared tree.
+    const parent = {
+      id: 'nested-dir-id',
+      mime: 'dir',
+      is_owner: true
+    } as unknown as AppFile
+    ;(metaGet as unknown as { mockResolvedValueOnce: (v: AppFile) => void }).mockResolvedValueOnce({
+      id: 'shared-file-id',
+      name: 'note.md'
+    } as unknown as AppFile)
+
+    await createNote(makeKeypair(), 'note', parent, 'caller-id', 'share-root-id')
+
+    expect(metaCreate).not.toHaveBeenCalled()
+    expect(uploadIntoSharedFolder).toHaveBeenCalledTimes(1)
+    const args = (
+      uploadIntoSharedFolder as unknown as {
+        mock: { calls: [{ payload: Record<string, unknown>; rosterFolderId?: string }][] }
+      }
+    ).mock.calls[0][0]
+    expect(args.payload.parentFileId).toBe('nested-dir-id')
+    expect(args.rosterFolderId).toBe('share-root-id')
+  })
+})
+
+describe('createDirInSharedFolder', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function makeKeypair(): KeyPair {
+    return {
+      publicKey: 'pub',
+      input: 'priv',
+      fingerprint: 'fp'
+    } as KeyPair
+  }
+
+  const parent = {
+    id: 'folder-id',
+    mime: 'dir',
+    is_owner: false,
+    share_role: 'editor'
+  } as unknown as AppFile
+
+  it('UNIT: fans the folder key out through uploadIntoSharedFolder', async () => {
+    ;(metaGet as unknown as { mockResolvedValueOnce: (v: AppFile) => void }).mockResolvedValueOnce({
+      id: 'shared-file-id',
+      mime: 'dir',
+      name: 'photos'
+    } as unknown as AppFile)
+
+    const created = await createDirInSharedFolder(makeKeypair(), 'photos', parent, 'caller-id')
+
+    expect(uploadIntoSharedFolder).toHaveBeenCalledTimes(1)
+    const args = (
+      uploadIntoSharedFolder as unknown as {
+        mock: { calls: [{ payload: Record<string, unknown>; rosterFolderId?: string }][] }
+      }
+    ).mock.calls[0][0]
+    expect(args.payload.mime).toBe('dir')
+    expect(args.payload.chunks).toBe(0)
+    expect(args.payload.size).toBeUndefined()
+    expect(args.payload.parentFileId).toBe('folder-id')
+    expect(args.rosterFolderId).toBeUndefined()
+    expect(searchTags).toHaveBeenCalledWith(expect.anything(), 'photos')
+    expect(metaCreate).not.toHaveBeenCalled()
+    expect(created.id).toBe('shared-file-id')
+  })
+
+  it('UNIT: pins the roster folder for creates below the share root', async () => {
+    ;(metaGet as unknown as { mockResolvedValueOnce: (v: AppFile) => void }).mockResolvedValueOnce({
+      id: 'shared-file-id',
+      mime: 'dir',
+      name: 'nested'
+    } as unknown as AppFile)
+
+    const intermediate = { ...parent, id: 'level-one-id', is_owner: true } as unknown as AppFile
+    await createDirInSharedFolder(
+      makeKeypair(),
+      'nested',
+      intermediate,
+      'caller-id',
+      'share-root-id'
+    )
+
+    const args = (
+      uploadIntoSharedFolder as unknown as {
+        mock: { calls: [{ payload: Record<string, unknown>; rosterFolderId?: string }][] }
+      }
+    ).mock.calls[0][0]
+    expect(args.payload.parentFileId).toBe('level-one-id')
+    expect(args.rosterFolderId).toBe('share-root-id')
+  })
+
+  it('UNIT: refuses to run without an active keypair', async () => {
+    await expect(
+      createDirInSharedFolder({ publicKey: 'pub' } as unknown as KeyPair, 'x', parent, 'caller-id')
+    ).rejects.toThrow('Cannot create directory without an active keypair')
+    expect(uploadIntoSharedFolder).not.toHaveBeenCalled()
+  })
+})

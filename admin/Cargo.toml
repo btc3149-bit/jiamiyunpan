@@ -1,0 +1,34 @@
+[package]
+name = "admin"
+version = "1.0.1"
+edition = "2021"
+rust-version = "1.91"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = { workspace = true }
+actix-web = { workspace = true }
+validr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+chrono = { workspace = true }
+num-traits = { workspace = true }
+
+auth = { path = "../auth" }
+context = { path = "../context" }
+cryptfns = { path = "../cryptfns" }
+entity = { path = "../entity" }
+error = { path = "../error" }
+fs = { path = "../fs" }
+settings = { path = "../settings" }
+shares = { path = "../shares" }
+util = { path = "../util" }
+
+[dev-dependencies]
+async-std = { workspace = true }
+entity = { path = "../entity", features = ["mock"] }
+context = { path = "../context", features = ["mock"] }
+shares = { path = "../shares", features = ["mock"] }

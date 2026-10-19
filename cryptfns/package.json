@@ -1,0 +1,11 @@
+{
+  "name": "@jiamiyunpan/cryptfns",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "pkg/cryptfns.js",
+  "types": "pkg/cryptfns.d.ts",
+  "scripts": {
+    "wasm-pack": "wasm-pack build --out-name cryptfns --target bundler --release"
+  }
+}

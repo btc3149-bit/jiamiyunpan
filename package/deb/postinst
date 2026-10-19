@@ -1,0 +1,42 @@
+#!/bin/sh
+set -e
+
+JIAM_CONF="/etc/jiamiyunpan.conf"
+JIAM_CONF_PERMS=640
+JIAM_HOME="/var/lib/jiamiyunpan/"
+JIAM_DATA="${JIAM_HOME}data/"
+JIAM_USER="jiamiyunpan"
+
+create_user() {
+    if id ${JIAM_USER} > /dev/null 2>&1; then return; fi
+    adduser --system --home "${JIAM_HOME}" --group ${JIAM_USER}
+}
+
+generate_jwt_secret() {
+    date | md5sum | awk '{print $1}'
+}
+
+create_config() {
+    if [ ! -f "${JIAM_CONF}" ]; then
+        cp /usr/share/jiamiyunpan/jiamiyunpan.conf ${JIAM_CONF}
+
+        JWT_SECRET="$(generate_jwt_secret)"
+
+        # Set the DATA_DIR into a persistent location
+        sed -i "s|DATA_DIR=.*|DATA_DIR=${JIAM_DATA}|" ${JIAM_CONF} && echo "DATA_DIR=${JIAM_DATA}"
+
+        # Set the JWT_SECRET into a random value
+        sed -i "s|# JWT_SECRET=.*|JWT_SECRET=${JWT_SECRET}|" ${JIAM_CONF} && echo "JWT_SECRET=***"
+
+        # Ensure that the config file has the correct ownership
+        chown ${JIAM_USER}:${JIAM_USER} ${JIAM_CONF}
+        
+        # Ensure that the config file has the correct permissions
+        chmod ${JIAM_CONF_PERMS} ${JIAM_CONF}
+    fi
+}
+
+create_user
+create_config
+
+#DEBHELPER#

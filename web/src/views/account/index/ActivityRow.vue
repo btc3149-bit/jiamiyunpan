@@ -1,0 +1,54 @@
+<script setup lang="ts">
+import { formatPrettyDate } from '!/index'
+import BaseButtonConfirm from '@/components/ui/BaseButtonConfirm.vue'
+import { mdiShieldOffOutline } from '@mdi/js'
+import type { Authenticated, Session } from 'types'
+import { computed } from 'vue'
+
+const props = defineProps<{
+  authenticated: Authenticated
+  session: Session
+}>()
+
+const emits = defineEmits(['revoke'])
+
+const createdAt = computed(() => formatPrettyDate(props.session.created_at))
+const updatedAt = computed(() => formatPrettyDate(props.session.updated_at))
+const expiresAt = computed(() => formatPrettyDate(props.session.expires_at))
+
+const expired = computed(() => props.session.expires_at < new Date().valueOf() / 1000)
+const isCurrent = computed(() => props.authenticated.session.id === props.session.id)
+const isActive = computed(() => !!props.session.refresh && !expired.value)
+</script>
+<template>
+  <tr :class="{ 'opacity-50': !isActive && !isCurrent }">
+    <td :data-label="$t('account.activity.ipAddress')">{{ session.ip }}</td>
+    <td :data-label="$t('account.activity.device')" class="max-w-[200px] truncate text-sm">
+      {{ session.user_agent }}
+    </td>
+    <td :data-label="$t('account.activity.signedIn')">{{ createdAt }}</td>
+    <td :data-label="$t('account.activity.lastSeen')">{{ updatedAt }}</td>
+    <td :data-label="$t('account.activity.expires')">
+      <span v-if="isCurrent">—</span>
+      <span v-else-if="expired" class="text-brownish-400 dark:text-brownish-50">{{ $t('account.activity.statusExpired') }}</span>
+      <span v-else>{{ expiresAt }}</span>
+    </td>
+    <td :data-label="$t('account.activity.status')">
+      <span v-if="isCurrent" class="inline-flex items-center text-xs font-semibold bg-greeny-500/15 text-greeny-500 dark:text-greeny-300 px-2 py-0.5 rounded-full">{{ $t('account.activity.statusCurrent') }}</span>
+      <span v-else-if="isActive" class="inline-flex items-center text-xs font-semibold bg-blueish-500/15 text-blueish-400 px-2 py-0.5 rounded-full">{{ $t('account.activity.statusActive') }}</span>
+      <span v-else-if="expired" class="inline-flex items-center text-xs font-semibold bg-paper-100 dark:bg-brownish-700 text-brownish-400 dark:text-brownish-50 px-2 py-0.5 rounded-full">{{ $t('account.activity.statusExpired') }}</span>
+      <span v-else class="inline-flex items-center text-xs font-semibold bg-redish-500/15 text-redish-500 dark:text-redish-100 px-2 py-0.5 rounded-full">{{ $t('account.activity.statusRevoked') }}</span>
+    </td>
+    <td>
+      <BaseButtonConfirm
+        :icon="mdiShieldOffOutline"
+        @confirm="emits('revoke', session)"
+        :label="$t('account.activity.revoke')"
+        :confirm-label="$t('account.activity.revokeConfirm')"
+        color="danger"
+        :small="true"
+        :disabled="!session.refresh || isCurrent || expired"
+      />
+    </td>
+  </tr>
+</template>

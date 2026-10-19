@@ -1,0 +1,57 @@
+@layer base {
+  /* One scrollbar for the whole app: slim rounded thumb on a transparent
+     track, following the theme. scrollbar-color inherits from the root, so
+     every scroller — body, modals, lists — picks it up; scrollbar-width
+     doesn't inherit, hence the universal selector. */
+  * {
+    scrollbar-width: thin;
+  }
+
+  html {
+    scrollbar-color: rgba(0, 0, 0, 0.3) transparent;
+  }
+
+  html.dark {
+    scrollbar-color: theme('colors.brownish.500') transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  :is(.dark, .dark *)::-webkit-scrollbar-thumb {
+    @apply bg-brownish-500;
+  }
+
+  :is(.dark, .dark *)::-webkit-scrollbar-thumb:hover {
+    @apply bg-brownish-400;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}

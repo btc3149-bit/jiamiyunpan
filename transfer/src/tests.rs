@@ -1,0 +1,2015 @@
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::str::FromStr;
+
+use crate::checksum;
+use crate::config::{UploadHashOptions, CHUNK_SIZE_BYTES, MAX_UPLOAD_RETRIES};
+use crate::error::{Error, HttpError, Result};
+use crate::platform::{DataSource, HttpClient, ProgressReporter};
+use crate::types::{Auth, ChunkResponse, ChunkTarget, DownloadSource, FileHashes};
+use crate::upload::compute_chunk_count;
+
+fn test_auth() -> Auth {
+    Auth {
+        base_url: "http://localhost:1234".into(),
+        jwt_token: Some("test-jwt".into()),
+        refresh_token: None,
+        cookie: None,
+    }
+}
+
+fn test_key() -> Vec<u8> {
+    // 32 bytes: first 16 = Ascon128a key, last 16 = nonce
+    b"test-encryption-key!test-nonce!!".to_vec()
+}
+
+struct MockDataSource {
+    data: Vec<u8>,
+}
+
+impl MockDataSource {
+    fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+}
+
+impl DataSource for MockDataSource {
+    fn read_chunk(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + '_>> {
+        let start = offset as usize;
+        let end = (offset + length).min(self.data.len() as u64) as usize;
+        let chunk = self.data[start..end].to_vec();
+        Box::pin(async move { Ok(chunk) })
+    }
+
+    fn total_size(&self) -> u64 {
+        self.data.len() as u64
+    }
+}
+
+/// When `scripted_upload_responses` is non-empty, responses are popped FIFO.
+/// Otherwise the upload auto-succeeds and stores the chunk in `stored_chunks`
+/// so it can be read back during download (roundtrip testing).
+struct MockHttpClient {
+    scripted_upload_responses: RefCell<std::collections::VecDeque<Result<ChunkResponse>>>,
+    stored_chunks: RefCell<HashMap<u64, Vec<u8>>>,
+    upload_call_count: Cell<u64>,
+    scripted_download_responses: RefCell<std::collections::VecDeque<Result<Vec<u8>>>>,
+    received_hashes: RefCell<Option<FileHashes>>,
+    scripted_upload_tar_responses: RefCell<std::collections::VecDeque<Result<ChunkResponse>>>,
+    last_upload_tar_body: RefCell<Option<Vec<u8>>>,
+    requested_urls: RefCell<Vec<String>>,
+    /// `true` once `finalize_upload` has been called for this file.
+    finalized: Cell<bool>,
+    /// Whether each recorded request was one that *could* carry credentials,
+    /// in request order. A direct request that ever records `true` means the
+    /// type split leaked.
+    carried_credentials: RefCell<Vec<bool>>,
+    /// Fail this many `put_chunk_direct` calls before succeeding, so tests
+    /// can drive the retry-then-relay arm instead of only the happy path.
+    direct_put_failures: Cell<u32>,
+    /// Same, for `finalize_upload`.
+    finalize_failures: Cell<u32>,
+    finalize_calls: Cell<u32>,
+}
+
+impl MockHttpClient {
+    fn new() -> Self {
+        Self {
+            scripted_upload_responses: RefCell::new(std::collections::VecDeque::new()),
+            stored_chunks: RefCell::new(HashMap::new()),
+            upload_call_count: Cell::new(0),
+            scripted_download_responses: RefCell::new(std::collections::VecDeque::new()),
+            received_hashes: RefCell::new(None),
+            scripted_upload_tar_responses: RefCell::new(std::collections::VecDeque::new()),
+            requested_urls: RefCell::new(Vec::new()),
+            finalized: Cell::new(false),
+            carried_credentials: RefCell::new(Vec::new()),
+            last_upload_tar_body: RefCell::new(None),
+            direct_put_failures: Cell::new(0),
+            finalize_failures: Cell::new(0),
+            finalize_calls: Cell::new(0),
+        }
+    }
+
+    fn push_upload_error(&self, err: Error) {
+        self.scripted_upload_responses
+            .borrow_mut()
+            .push_back(Err(err));
+    }
+
+    fn push_download_error(&self, err: Error) {
+        self.scripted_download_responses
+            .borrow_mut()
+            .push_back(Err(err));
+    }
+
+    fn upload_count(&self) -> u64 {
+        self.upload_call_count.get()
+    }
+
+    fn take_last_tar_body(&self) -> Option<Vec<u8>> {
+        self.last_upload_tar_body.borrow_mut().take()
+    }
+}
+
+impl HttpClient for MockHttpClient {
+    fn upload_chunk(
+        &self,
+        _auth: &Auth,
+        _file_id: &str,
+        chunk_index: u64,
+        _checksum: &str,
+        data: &[u8],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ChunkResponse>> + '_>> {
+        self.upload_call_count.set(self.upload_call_count.get() + 1);
+
+        let scripted = self.scripted_upload_responses.borrow_mut().pop_front();
+
+        if let Some(result) = scripted {
+            if result.is_ok() {
+                self.stored_chunks
+                    .borrow_mut()
+                    .insert(chunk_index, data.to_vec());
+            }
+            return Box::pin(async move { result });
+        }
+
+        self.stored_chunks
+            .borrow_mut()
+            .insert(chunk_index, data.to_vec());
+        let stored = self.stored_chunks.borrow().len() as i64;
+        let resp = ChunkResponse {
+            chunks_stored: Some(stored),
+            finished_upload_at: None,
+        };
+        Box::pin(async move { Ok(resp) })
+    }
+
+    fn download_chunk<'a>(
+        &'a self,
+        target: ChunkTarget<'_>,
+        chunk_index: u64,
+        on_bytes: Box<dyn Fn(u64) + 'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + 'a>> {
+        self.requested_urls.borrow_mut().push(match target {
+            // Recorded without the base URL so existing path assertions keep
+            // matching; direct URLs are recorded whole.
+            ChunkTarget::Api { source, .. } => source.chunk_url("", chunk_index),
+            ChunkTarget::Direct(url) => url.to_string(),
+        });
+        self.carried_credentials
+            .borrow_mut()
+            .push(matches!(target, ChunkTarget::Api { .. }));
+        let scripted = self.scripted_download_responses.borrow_mut().pop_front();
+
+        if let Some(result) = scripted {
+            return Box::pin(async move {
+                // Mirror a streaming body: half the bytes land before the
+                // request completes, so pipeline tests can observe progress
+                // from a chunk that hasn't finished.
+                if let Ok(ref data) = result {
+                    on_bytes(data.len() as u64 / 2);
+                    on_bytes(data.len() as u64);
+                }
+                result
+            });
+        }
+
+        let data = self.stored_chunks.borrow().get(&chunk_index).cloned();
+        Box::pin(async move {
+            let data = data.ok_or(Error::Http(HttpError {
+                status: 404,
+                message: format!("chunk {chunk_index} not found"),
+                validation: None,
+            }))?;
+            on_bytes(data.len() as u64 / 2);
+            on_bytes(data.len() as u64);
+            Ok(data)
+        })
+    }
+
+    fn download_all_chunks<'a>(
+        &'a self,
+        _auth: &Auth,
+        _file_id: &str,
+        on_bytes: Box<dyn Fn(u64) + 'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + 'a>> {
+        let stored = self.stored_chunks.borrow();
+        let mut indices: Vec<u64> = stored.keys().copied().collect();
+        indices.sort();
+
+        let entries: Vec<(String, Vec<u8>)> = indices
+            .into_iter()
+            .filter_map(|idx| {
+                stored
+                    .get(&idx)
+                    .map(|d| (format!("{:06}.enc", idx), d.clone()))
+            })
+            .collect();
+        let archive = crate::tar::build_tar(&entries);
+        Box::pin(async move {
+            on_bytes(archive.len() as u64);
+            Ok(archive)
+        })
+    }
+
+    fn upload_chunks_tar(
+        &self,
+        _auth: &Auth,
+        _file_id: &str,
+        tar_body: Vec<u8>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ChunkResponse>> + '_>> {
+        let scripted = self.scripted_upload_tar_responses.borrow_mut().pop_front();
+        *self.last_upload_tar_body.borrow_mut() = Some(tar_body.clone());
+
+        if let Some(result) = scripted {
+            return Box::pin(async move { result });
+        }
+
+        let entries = match crate::tar::extract_tar(&tar_body) {
+            Ok(e) => e,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+
+        for entry in &entries {
+            let idx: u64 = entry
+                .name
+                .strip_suffix(".enc")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            self.stored_chunks
+                .borrow_mut()
+                .insert(idx, entry.data.clone());
+        }
+
+        let stored = self.stored_chunks.borrow().len() as i64;
+        let resp = ChunkResponse {
+            chunks_stored: Some(stored),
+            finished_upload_at: None,
+        };
+        Box::pin(async move { Ok(resp) })
+    }
+
+    fn put_chunk_direct(
+        &self,
+        url: &str,
+        data: &[u8],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+        self.requested_urls.borrow_mut().push(url.to_string());
+        // No `Auth` in this signature at all, which is the point: there is
+        // nothing here to attach even by accident.
+        self.carried_credentials.borrow_mut().push(false);
+
+        let failures = self.direct_put_failures.get();
+        if failures > 0 {
+            self.direct_put_failures.set(failures - 1);
+            return Box::pin(async {
+                Err(Error::Http(HttpError {
+                    status: 503,
+                    message: "bucket shed load".into(),
+                    validation: None,
+                }))
+            });
+        }
+
+        // Keyed off the URL the manifest was built from, so a roundtrip test
+        // can read back what a direct upload wrote.
+        let chunk: u64 = url
+            .rsplit('/')
+            .next()
+            .and_then(|last| last.split('.').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        self.stored_chunks.borrow_mut().insert(chunk, data.to_vec());
+        self.upload_call_count.set(self.upload_call_count.get() + 1);
+
+        Box::pin(async { Ok(()) })
+    }
+
+    fn finalize_upload(
+        &self,
+        _auth: &Auth,
+        _file_id: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+        self.finalize_calls.set(self.finalize_calls.get() + 1);
+
+        let failures = self.finalize_failures.get();
+        if failures > 0 {
+            self.finalize_failures.set(failures - 1);
+            return Box::pin(async {
+                Err(Error::Http(HttpError {
+                    status: 502,
+                    message: "proxy blip".into(),
+                    validation: None,
+                }))
+            });
+        }
+
+        self.finalized.set(true);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn update_hashes(
+        &self,
+        _auth: &Auth,
+        _file_id: &str,
+        hashes: &FileHashes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+        *self.received_hashes.borrow_mut() = Some(hashes.clone());
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ProgressEvent {
+    ChunkUploaded {
+        chunk: u64,
+        total_chunks: u64,
+        is_done: bool,
+    },
+    ChunkDownloaded {
+        bytes: u64,
+        total_bytes: u64,
+    },
+    Error {
+        error: String,
+    },
+    Complete,
+}
+
+/// Records all progress callbacks. If `cancel_on_call` is set, `is_cancelled`
+/// returns `true` once that many calls have been made (0 = immediate).
+struct MockProgressReporter {
+    events: RefCell<Vec<ProgressEvent>>,
+    cancel_on_call: Option<u32>,
+    is_cancelled_calls: Cell<u32>,
+}
+
+impl MockProgressReporter {
+    fn new() -> Self {
+        Self {
+            events: RefCell::new(Vec::new()),
+            cancel_on_call: None,
+            is_cancelled_calls: Cell::new(0),
+        }
+    }
+
+    fn cancelling_immediately() -> Self {
+        Self {
+            events: RefCell::new(Vec::new()),
+            cancel_on_call: Some(0),
+            is_cancelled_calls: Cell::new(0),
+        }
+    }
+
+    fn events(&self) -> Vec<ProgressEvent> {
+        self.events.borrow().clone()
+    }
+}
+
+impl ProgressReporter for MockProgressReporter {
+    fn on_chunk_uploaded(&self, _file_id: &str, chunk: u64, total_chunks: u64, is_done: bool) {
+        self.events.borrow_mut().push(ProgressEvent::ChunkUploaded {
+            chunk,
+            total_chunks,
+            is_done,
+        });
+    }
+
+    fn on_chunk_downloaded(&self, _file_id: &str, bytes: u64, total_bytes: u64) {
+        self.events
+            .borrow_mut()
+            .push(ProgressEvent::ChunkDownloaded { bytes, total_bytes });
+    }
+
+    fn on_error(&self, _file_id: &str, error: &str) {
+        self.events.borrow_mut().push(ProgressEvent::Error {
+            error: error.to_string(),
+        });
+    }
+
+    fn on_complete(&self, _file_id: &str) {
+        self.events.borrow_mut().push(ProgressEvent::Complete);
+    }
+
+    fn is_cancelled(&self, _file_id: &str) -> bool {
+        let n = self.is_cancelled_calls.get();
+        self.is_cancelled_calls.set(n + 1);
+        self.cancel_on_call.is_some_and(|threshold| n >= threshold)
+    }
+}
+
+#[test]
+fn chunk_count_zero() {
+    assert_eq!(compute_chunk_count(0), 1);
+}
+
+#[test]
+fn chunk_count_exact() {
+    assert_eq!(compute_chunk_count(CHUNK_SIZE_BYTES), 1);
+}
+
+#[test]
+fn chunk_count_remainder() {
+    assert_eq!(compute_chunk_count(CHUNK_SIZE_BYTES + 1), 2);
+}
+
+#[test]
+fn chunk_count_multiple_exact() {
+    assert_eq!(compute_chunk_count(CHUNK_SIZE_BYTES * 3), 3);
+}
+
+#[test]
+fn crc16_deterministic() {
+    let data = b"hello world";
+    let a = checksum::crc16(data);
+    let b = checksum::crc16(data);
+    assert_eq!(a, b);
+    assert!(!a.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_small_file() {
+    let data = vec![42u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    let hashes = crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f1",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 1);
+    assert_eq!(http.stored_chunks.borrow().len(), 1);
+    assert!(!hashes.sha256.is_empty());
+    assert!(hashes.md5.as_ref().is_some_and(|s| !s.is_empty()));
+    assert!(http.received_hashes.borrow().is_some());
+
+    let events = progress.events();
+    assert!(matches!(events.last(), Some(ProgressEvent::Complete)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ProgressEvent::ChunkUploaded { chunk: 0, .. })));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_multi_chunk() {
+    let size = CHUNK_SIZE_BYTES as usize + 1000;
+    let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f2",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 2);
+    assert_eq!(http.stored_chunks.borrow().len(), 2);
+
+    let upload_events: Vec<_> = progress
+        .events()
+        .iter()
+        .filter(|e| matches!(e, ProgressEvent::ChunkUploaded { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(upload_events.len(), 2);
+    assert!(matches!(
+        progress.events().last(),
+        Some(ProgressEvent::Complete)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_resume_skips_existing() {
+    let size = CHUNK_SIZE_BYTES as usize * 2 + 500;
+    let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    // Chunks 0 and 2 already uploaded — only chunk 1 should be sent
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f3",
+        &test_key(),
+        &[0, 2],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 1);
+    assert!(http.stored_chunks.borrow().contains_key(&1));
+    assert!(!http.stored_chunks.borrow().contains_key(&0));
+    assert!(!http.stored_chunks.borrow().contains_key(&2));
+}
+
+/// A resume that finds every chunk already stored uploads nothing — and that
+/// run is exactly the one that exists to deliver the finalize its predecessor
+/// crashed before sending. Gating finalize on "some new chunk went direct"
+/// left such files uncommitted forever: all their bytes in the bucket, the
+/// version pointer never moving, and every retry repeating the same no-op.
+#[tokio::test(flavor = "current_thread")]
+async fn upload_resume_with_nothing_left_still_finalizes() {
+    let size = CHUNK_SIZE_BYTES as usize * 2;
+    let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f3-done",
+        &test_key(),
+        &[0, 1],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket/0".into(), "https://bucket/1".into()]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 0, "everything was already stored");
+    assert!(
+        http.finalized.get(),
+        "the resume's whole point is delivering the missing finalize"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_checksum_retry_succeeds() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    let mut validation = HashMap::new();
+    validation.insert(
+        "checksum".into(),
+        "checksum_mismatch: 'aaa' != 'bbb'".into(),
+    );
+    http.push_upload_error(Error::Http(HttpError {
+        status: 422,
+        message: "Validation error".into(),
+        validation: Some(validation),
+    }));
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f4",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // First call failed, second succeeded
+    assert_eq!(http.upload_count(), 2);
+    assert!(matches!(
+        progress.events().last(),
+        Some(ProgressEvent::Complete)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_checksum_exhausts_retries() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    // Initial attempt + MAX_UPLOAD_RETRIES retries = MAX_UPLOAD_RETRIES + 1 total
+    for _ in 0..=MAX_UPLOAD_RETRIES {
+        let mut validation = HashMap::new();
+        validation.insert("checksum".into(), "checksum_mismatch".into());
+        http.push_upload_error(Error::Http(HttpError {
+            status: 422,
+            message: "Validation error".into(),
+            validation: Some(validation),
+        }));
+    }
+
+    let result = crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f5",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), Error::Http(_)));
+    assert_eq!(http.upload_count(), MAX_UPLOAD_RETRIES as u64 + 1);
+    assert!(progress
+        .events()
+        .iter()
+        .any(|e| matches!(e, ProgressEvent::Error { .. })));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_chunk_already_exists_is_not_an_error() {
+    let data = vec![42u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    let mut validation = HashMap::new();
+    validation.insert("chunk".into(), "chunk_already_exists".into());
+    http.push_upload_error(Error::Http(HttpError {
+        status: 422,
+        message: "Validation error".into(),
+        validation: Some(validation),
+    }));
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f6",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 1);
+    assert!(matches!(
+        progress.events().last(),
+        Some(ProgressEvent::Complete)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_cancelled_before_any_work() {
+    let data = vec![42u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::cancelling_immediately();
+
+    let result = crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f7",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert_eq!(http.upload_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_empty_file() {
+    let source = MockDataSource::new(vec![]);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    // Zero-byte file still produces 1 chunk. Ascon128a adds a 16-byte auth tag,
+    // so the encrypted output is non-empty and the upload succeeds.
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f8",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.upload_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_hashes_are_deterministic() {
+    let data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+
+    // Fresh upload
+    let source1 = MockDataSource::new(data.clone());
+    let http1 = MockHttpClient::new();
+    let progress1 = MockProgressReporter::new();
+    let hashes1 = crate::upload::upload_file(
+        &http1,
+        &source1,
+        &progress1,
+        &test_auth(),
+        "h1",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Same data again
+    let source2 = MockDataSource::new(data.clone());
+    let http2 = MockHttpClient::new();
+    let progress2 = MockProgressReporter::new();
+    let hashes2 = crate::upload::upload_file(
+        &http2,
+        &source2,
+        &progress2,
+        &test_auth(),
+        "h2",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(hashes1.sha256, hashes2.sha256);
+    assert_eq!(hashes1.md5, hashes2.md5);
+    assert_eq!(hashes1.sha1, hashes2.sha1);
+    assert_eq!(hashes1.blake2b, hashes2.blake2b);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_resume_produces_same_hashes_as_fresh() {
+    let size = CHUNK_SIZE_BYTES as usize * 3 + 500;
+    let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+
+    // Fresh upload
+    let source1 = MockDataSource::new(data.clone());
+    let http1 = MockHttpClient::new();
+    let progress1 = MockProgressReporter::new();
+    let fresh_hashes = crate::upload::upload_file(
+        &http1,
+        &source1,
+        &progress1,
+        &test_auth(),
+        "r1",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Resumed upload (chunks 0 and 2 already uploaded)
+    let source2 = MockDataSource::new(data);
+    let http2 = MockHttpClient::new();
+    let progress2 = MockProgressReporter::new();
+    let resume_hashes = crate::upload::upload_file(
+        &http2,
+        &source2,
+        &progress2,
+        &test_auth(),
+        "r2",
+        &test_key(),
+        &[0, 2],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(fresh_hashes.sha256, resume_hashes.sha256);
+    assert_eq!(fresh_hashes.md5, resume_hashes.md5);
+    assert_eq!(fresh_hashes.sha1, resume_hashes.sha1);
+    assert_eq!(fresh_hashes.blake2b, resume_hashes.blake2b);
+
+    // Resumed upload should only upload chunks 1 and 3
+    assert_eq!(http2.upload_count(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_hash_disable_mask_omits_optional_hashes() {
+    let data = vec![9u8; 512];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    let hashes = crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "mask",
+        &test_key(),
+        &[],
+        UploadHashOptions::from_disable_mask(
+            crate::config::HASH_DISABLE_MD5
+                | crate::config::HASH_DISABLE_SHA1
+                | crate::config::HASH_DISABLE_BLAKE2B,
+        ),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(!hashes.sha256.is_empty());
+    assert!(hashes.md5.is_none());
+    assert!(hashes.sha1.is_none());
+    assert!(hashes.blake2b.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_roundtrip() {
+    let original = b"Hello, this is a roundtrip test with some data!".to_vec();
+    let source = MockDataSource::new(original.clone());
+    let http = MockHttpClient::new();
+    let up_progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up_progress,
+        &test_auth(),
+        "rt",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dl_progress = MockProgressReporter::new();
+    let chunk_count = compute_chunk_count(original.len() as u64);
+    let downloaded = crate::download::download_file(
+        &http,
+        &dl_progress,
+        &test_auth(),
+        "rt",
+        original.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, original);
+    assert!(matches!(
+        dl_progress.events().last(),
+        Some(ProgressEvent::Complete)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_multi_chunk_ordering() {
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let mut data = Vec::with_capacity(cs * 2 + 500);
+    data.extend(vec![0xAAu8; cs]);
+    data.extend(vec![0xBBu8; cs]);
+    data.extend(vec![0xCCu8; 500]);
+
+    let source = MockDataSource::new(data.clone());
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "ord",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dl = MockProgressReporter::new();
+    let chunk_count = compute_chunk_count(data.len() as u64);
+    let downloaded = crate::download::download_file(
+        &http,
+        &dl,
+        &test_auth(),
+        "ord",
+        data.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, data);
+    assert!(downloaded[..cs].iter().all(|&b| b == 0xAA));
+    assert!(downloaded[cs..cs * 2].iter().all(|&b| b == 0xBB));
+    assert!(downloaded[cs * 2..].iter().all(|&b| b == 0xCC));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_multi_chunk_uses_distinct_nonces() {
+    // Two identical plaintext chunks: a shared (key, nonce) pair would store
+    // identical ciphertexts and let the server learn plaintext relationships.
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let data = vec![0x5Au8; cs * 2];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "nonce",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let stored = http.stored_chunks.borrow();
+    assert_ne!(stored[&0], stored[&1]);
+
+    // Chunk 1 must not decrypt under the fixed legacy nonce.
+    let cipher = cryptfns::cipher::Cipher::from_str(cryptfns::cipher::DEFAULT).unwrap();
+    assert!(cipher.decrypt(test_key(), stored[&1].clone()).is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_legacy_fixed_nonce_file() {
+    // Files uploaded before per-chunk nonces encrypted every chunk with the
+    // key blob's embedded nonce; downloads must keep decrypting them.
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let mut original = vec![0x11u8; cs];
+    original.extend(vec![0x22u8; cs]);
+    original.extend(vec![0x33u8; 300]);
+
+    let http = MockHttpClient::new();
+    let cipher = cryptfns::cipher::Cipher::from_str(cryptfns::cipher::DEFAULT).unwrap();
+    for (i, chunk) in original.chunks(cs).enumerate() {
+        let encrypted = cipher.encrypt(test_key(), chunk.to_vec()).unwrap();
+        http.stored_chunks.borrow_mut().insert(i as u64, encrypted);
+    }
+
+    let progress = MockProgressReporter::new();
+    let downloaded = crate::download::download_file(
+        &http,
+        &progress,
+        &test_auth(),
+        "legacy",
+        original.len() as u64,
+        compute_chunk_count(original.len() as u64),
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, original);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_single_chunk_matches_legacy_ciphertext() {
+    // Chunk 0 derives the identity nonce, so files up to one chunk stay
+    // byte-identical across the scheme change in both directions.
+    let data = vec![7u8; 1024];
+    let source = MockDataSource::new(data.clone());
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "ident",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let cipher = cryptfns::cipher::Cipher::from_str(cryptfns::cipher::DEFAULT).unwrap();
+    let legacy = cipher.encrypt(test_key(), data).unwrap();
+    assert_eq!(http.stored_chunks.borrow()[&0], legacy);
+}
+
+#[test]
+fn byte_tally_reports_from_partial_chunks_and_survives_restart() {
+    use crate::download::ByteTally;
+    let mut tally = ByteTally::new();
+    let total = 10 * 1024 * 1024;
+
+    // Below the emission delta: recorded, not reported.
+    assert_eq!(tally.record(0, 100 * 1024, total), None);
+
+    // A second in-flight chunk pushes the sum over the threshold — progress
+    // exists before either chunk has finished.
+    assert_eq!(tally.record(1, 200 * 1024, total), Some(300 * 1024));
+
+    // Growth below the delta since the last report stays quiet.
+    assert_eq!(tally.record(0, 150 * 1024, total), None);
+
+    // A restarted chunk overwrites its own entry instead of double
+    // counting: chunk 1 drops from 200 KiB back to 10 KiB.
+    assert_eq!(tally.record(1, 10 * 1024, total), None);
+
+    // The next report reflects the corrected sum (crossing the delta again).
+    assert_eq!(tally.record(0, 700 * 1024, total), Some(710 * 1024));
+}
+
+#[test]
+fn byte_tally_never_reports_completion_early() {
+    use crate::download::ByteTally;
+    let mut tally = ByteTally::new();
+    let total = 400 * 1024;
+
+    // Received ciphertext can exceed the plaintext total; the report is
+    // capped one byte short so only the pipeline's final event completes
+    // the bar.
+    assert_eq!(tally.record(0, 500 * 1024, total), Some(total - 1));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_reports_progress_before_first_chunk_completes() {
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let data = vec![0x42u8; cs + 500];
+
+    let source = MockDataSource::new(data.clone());
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "stream",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dl = MockProgressReporter::new();
+    let chunk_count = compute_chunk_count(data.len() as u64);
+    let downloaded = crate::download::download_file(
+        &http,
+        &dl,
+        &test_auth(),
+        "stream",
+        data.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(downloaded, data);
+
+    let byte_events: Vec<(u64, u64)> = dl
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            ProgressEvent::ChunkDownloaded { bytes, total_bytes } => Some((*bytes, *total_bytes)),
+            _ => None,
+        })
+        .collect();
+
+    // The mock streams each chunk in two reads, so at least one report
+    // lands mid-chunk — strictly between zero and the full size.
+    assert!(
+        byte_events
+            .iter()
+            .any(|(b, _)| *b > 0 && *b < data.len() as u64),
+        "expected a mid-transfer progress report, got {byte_events:?}"
+    );
+
+    // Nothing claims completion before the final exact report...
+    let (last, rest) = byte_events.split_last().unwrap();
+    assert!(rest.iter().all(|(b, _)| *b < data.len() as u64));
+
+    // ...which carries the assembled plaintext size against the same total.
+    assert_eq!(*last, (data.len() as u64, data.len() as u64));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_streaming_emits_ordered_chunks() {
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let mut data = Vec::with_capacity(cs * 2 + 300);
+    data.extend(vec![0x11u8; cs]);
+    data.extend(vec![0x22u8; cs]);
+    data.extend(vec![0x33u8; 300]);
+
+    let source = MockDataSource::new(data.clone());
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "sink",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dl = MockProgressReporter::new();
+    let chunk_count = compute_chunk_count(data.len() as u64);
+    let mut emitted: Vec<Vec<u8>> = Vec::new();
+    crate::download::download_file_streaming(
+        &http,
+        &dl,
+        &test_auth(),
+        DownloadSource::Storage("sink"),
+        data.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+        None,
+        &mut |chunk| emitted.push(chunk),
+    )
+    .await
+    .unwrap();
+
+    // One emission per chunk, in file order, reassembling exactly — the
+    // sink sees what the buffering path would have returned.
+    assert_eq!(emitted.len(), chunk_count as usize);
+    assert_eq!(emitted.concat(), data);
+    assert!(matches!(dl.events().last(), Some(ProgressEvent::Complete)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_cancelled_before_any_work() {
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::cancelling_immediately();
+
+    let result = crate::download::download_file(
+        &http,
+        &progress,
+        &test_auth(),
+        "cancel",
+        1000,
+        1,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await;
+
+    assert!(matches!(result, Err(Error::Cancelled)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_http_error_propagates() {
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    http.push_download_error(Error::Http(HttpError {
+        status: 500,
+        message: "Internal Server Error".into(),
+        validation: None,
+    }));
+
+    let result = crate::download::download_file(
+        &http,
+        &progress,
+        &test_auth(),
+        "err",
+        1000,
+        1,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await;
+
+    match result {
+        Err(Error::Http(e)) => assert_eq!(e.status, 500),
+        other => panic!("Expected Http error, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_all_chunks_tar_roundtrip() {
+    let original = b"Hello, tar download roundtrip test!".to_vec();
+    let source = MockDataSource::new(original.clone());
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "tar_rt",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Download as tar archive and extract entries.
+    let tar_data = http
+        .download_all_chunks(&test_auth(), "tar_rt", Box::new(|_| {}))
+        .await
+        .unwrap();
+    let entries = crate::tar::extract_tar(&tar_data).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "000000.enc");
+    // Encrypted data should be non-empty (original + auth tag).
+    assert!(!entries[0].data.is_empty());
+
+    // Decrypt the chunk and verify it matches the original.
+    let cipher = cryptfns::cipher::Cipher::from_str(cryptfns::cipher::DEFAULT).unwrap();
+    let decrypted = cipher.decrypt(test_key(), entries[0].data.clone()).unwrap();
+    assert_eq!(decrypted, original);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_all_chunks_tar_multi_chunk() {
+    let cs = CHUNK_SIZE_BYTES as usize;
+    let mut data = Vec::with_capacity(cs + 500);
+    data.extend(vec![0xAAu8; cs]);
+    data.extend(vec![0xBBu8; 500]);
+
+    let source = MockDataSource::new(data.clone());
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "tar_mc",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let tar_data = http
+        .download_all_chunks(&test_auth(), "tar_mc", Box::new(|_| {}))
+        .await
+        .unwrap();
+    let entries = crate::tar::extract_tar(&tar_data).unwrap();
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "000000.enc");
+    assert_eq!(entries[1].name, "000001.enc");
+
+    // Decrypt each chunk and reassemble.
+    let cipher = cryptfns::cipher::Cipher::from_str(cryptfns::cipher::DEFAULT).unwrap();
+    let mut reassembled = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let plaintext = cipher
+            .decrypt_chunk(&test_key(), i as u64, entry.data.clone())
+            .unwrap();
+        reassembled.extend_from_slice(&plaintext);
+    }
+    assert_eq!(reassembled, data);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_tar_roundtrip_via_mock() {
+    // Feed N chunks through the in-memory tar uploader and verify the tar
+    // body the mock captured contains the exact same bytes back out.
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    let entries = vec![
+        ("000000.enc".to_string(), vec![0xAAu8; 2048]),
+        ("000001.enc".to_string(), vec![0xBBu8; 1024]),
+        ("000002.enc".to_string(), vec![0xCCu8; 512]),
+    ];
+
+    crate::upload_tar::upload_chunks_as_tar_in_memory(
+        &http,
+        &up,
+        &test_auth(),
+        "file-roundtrip",
+        entries.clone(),
+    )
+    .await
+    .unwrap();
+
+    let captured = http
+        .take_last_tar_body()
+        .expect("mock must record the tar body");
+    let parsed = crate::tar::extract_tar(&captured).expect("captured body must parse as tar");
+    assert_eq!(parsed.len(), entries.len());
+    for (expected, actual) in entries.iter().zip(parsed.iter()) {
+        assert_eq!(actual.name, expected.0);
+        assert_eq!(actual.data, expected.1);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_tar_progress_reported() {
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::new();
+
+    let entries = vec![
+        ("000000.enc".to_string(), vec![0u8; 1024]),
+        ("000001.enc".to_string(), vec![1u8; 1024]),
+    ];
+
+    crate::upload_tar::upload_chunks_as_tar_in_memory(
+        &http,
+        &up,
+        &test_auth(),
+        "file-progress",
+        entries,
+    )
+    .await
+    .unwrap();
+
+    let events = up.events();
+    let mut downloaded_bytes: Vec<u64> = Vec::new();
+    let mut saw_complete = false;
+    for ev in events {
+        match ev {
+            ProgressEvent::ChunkDownloaded { bytes, .. } => downloaded_bytes.push(bytes),
+            ProgressEvent::Complete => saw_complete = true,
+            _ => {}
+        }
+    }
+    assert!(
+        !downloaded_bytes.is_empty(),
+        "expected at least one progress tick"
+    );
+    assert!(
+        downloaded_bytes.iter().all(|&b| b > 0),
+        "progress must report non-zero bytes"
+    );
+    assert!(
+        saw_complete,
+        "on_complete must fire once all chunks are stored"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_tar_cancellation() {
+    // Immediate cancellation: is_cancelled returns true on its first call,
+    // before the HTTP send runs. The mock never sees a request.
+    let http = MockHttpClient::new();
+    let up = MockProgressReporter::cancelling_immediately();
+
+    let entries = vec![("000000.enc".to_string(), vec![0xFFu8; 256])];
+    let err = crate::upload_tar::upload_chunks_as_tar_in_memory(
+        &http,
+        &up,
+        &test_auth(),
+        "file-cancel",
+        entries,
+    )
+    .await
+    .expect_err("cancellation must surface as an error");
+
+    assert!(matches!(err, Error::Cancelled));
+    assert!(
+        http.take_last_tar_body().is_none(),
+        "cancelled upload must not have hit the HTTP client"
+    );
+}
+
+#[test]
+fn download_source_maps_route_and_method() {
+    let storage = DownloadSource::Storage("f-1");
+    assert_eq!(storage.id(), "f-1");
+    assert_eq!(storage.method(), "GET");
+    assert_eq!(
+        storage.chunk_url("https://h.example", 3),
+        "https://h.example/api/storage/f-1?chunk=3"
+    );
+
+    let link = DownloadSource::PublicLink("l-1");
+    assert_eq!(link.id(), "l-1");
+    assert_eq!(link.method(), "POST");
+    assert_eq!(
+        link.chunk_url("https://h.example", 0),
+        "https://h.example/api/links/l-1?chunk=0"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn public_link_download_hits_link_route_and_roundtrips() {
+    let original = b"public link content, decrypted only by the recipient".to_vec();
+    let source = MockDataSource::new(original.clone());
+    let http = MockHttpClient::new();
+    let up_progress = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up_progress,
+        &test_auth(),
+        "pl",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dl_progress = MockProgressReporter::new();
+    let chunk_count = compute_chunk_count(original.len() as u64);
+    let downloaded = crate::download::download_file_from(
+        &http,
+        &dl_progress,
+        &test_auth(),
+        DownloadSource::PublicLink("link-uuid"),
+        original.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, original);
+    let urls = http.requested_urls.borrow();
+    assert!(!urls.is_empty());
+    for url in urls.iter() {
+        assert!(
+            url.starts_with("/api/links/link-uuid?chunk="),
+            "expected link route, got {url}"
+        );
+    }
+}
+
+/// Chunks covered by a manifest are fetched from the bucket, and every one of
+/// those requests is built from a target that has no credentials to give.
+///
+/// The assertion is about reachability, not etiquette: `ChunkTarget::Direct`
+/// carries a URL and nothing else, so a transport handling it has no session
+/// cookie, bearer token or refresh header in scope to attach. This test fails
+/// the moment someone reintroduces a variant that does.
+#[tokio::test]
+async fn direct_urls_are_fetched_without_credentials() {
+    let original = vec![7u8; CHUNK_SIZE_BYTES as usize * 3 + 11];
+    let http = MockHttpClient::new();
+    let source = MockDataSource::new(original.clone());
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "direct-file",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let chunk_count = compute_chunk_count(original.len() as u64);
+    let manifest: Vec<String> = (0..chunk_count)
+        .map(|i| format!("https://bucket.example.com/obj/{i:06}.chunk?X-Amz-Signature=deadbeef"))
+        .collect();
+
+    http.requested_urls.borrow_mut().clear();
+    http.carried_credentials.borrow_mut().clear();
+
+    let dl = MockProgressReporter::new();
+    let downloaded = crate::download::Downloader::new(
+        test_auth(),
+        "direct-file",
+        original.len() as u64,
+        chunk_count,
+        test_key(),
+    )
+    .with_direct_urls(manifest.clone())
+    .run(&http, &dl)
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, original);
+
+    let urls = http.requested_urls.borrow();
+    assert_eq!(urls.len() as u64, chunk_count);
+    for url in urls.iter() {
+        assert!(
+            url.starts_with("https://bucket.example.com/"),
+            "expected the bucket, got {url}"
+        );
+    }
+
+    assert!(
+        http.carried_credentials
+            .borrow()
+            .iter()
+            .all(|carried| !carried),
+        "a direct chunk request was built from a target holding credentials"
+    );
+}
+
+/// A manifest shorter than the file leaves the chunks it does not cover on the
+/// API path, so a partial answer still transfers the whole file.
+#[tokio::test]
+async fn a_short_manifest_falls_back_per_chunk() {
+    let original = vec![3u8; CHUNK_SIZE_BYTES as usize * 3 + 5];
+    let http = MockHttpClient::new();
+    let source = MockDataSource::new(original.clone());
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "partial-file",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let chunk_count = compute_chunk_count(original.len() as u64);
+    assert!(
+        chunk_count > 1,
+        "test needs more than one chunk to be meaningful"
+    );
+
+    http.requested_urls.borrow_mut().clear();
+    http.carried_credentials.borrow_mut().clear();
+
+    let dl = MockProgressReporter::new();
+    let downloaded = crate::download::Downloader::new(
+        test_auth(),
+        "partial-file",
+        original.len() as u64,
+        chunk_count,
+        test_key(),
+    )
+    .with_direct_urls(vec![
+        "https://bucket.example.com/obj/000000.chunk".to_string()
+    ])
+    .run(&http, &dl)
+    .await
+    .unwrap();
+
+    assert_eq!(downloaded, original);
+
+    let urls = http.requested_urls.borrow();
+    assert!(urls
+        .iter()
+        .any(|u| u.starts_with("https://bucket.example.com/")));
+    assert!(urls
+        .iter()
+        .any(|u| u.starts_with("/api/storage/partial-file")));
+}
+
+/// A file whose chunks all have presigned URLs is written into the bucket and
+/// then committed, with the server seeing neither the ciphertext nor a chunk
+/// request.
+///
+/// The credential assertion is the mirror of the read side's: the signature
+/// covers the method, the key and the exact content length, so anything else
+/// attached to the request is at best ignored and at worst a rejection.
+#[tokio::test(flavor = "current_thread")]
+async fn direct_uploads_reach_the_bucket_and_finalize() {
+    let original = vec![9u8; CHUNK_SIZE_BYTES as usize * 2 + 17];
+    let http = MockHttpClient::new();
+    let source = MockDataSource::new(original.clone());
+    let up = MockProgressReporter::new();
+
+    let chunk_count = compute_chunk_count(original.len() as u64);
+    let manifest: Vec<String> = (0..chunk_count)
+        .map(|i| format!("https://bucket.example.com/obj/{i:06}.enc?X-Amz-Signature=deadbeef"))
+        .collect();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "direct-up",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&manifest),
+    )
+    .await
+    .unwrap();
+
+    {
+        let urls = http.requested_urls.borrow();
+        assert_eq!(urls.len() as u64, chunk_count);
+        for url in urls.iter() {
+            assert!(
+                url.starts_with("https://bucket.example.com/"),
+                "expected the bucket, got {url}"
+            );
+        }
+    }
+    assert!(
+        http.carried_credentials
+            .borrow()
+            .iter()
+            .all(|carried| !carried),
+        "a direct chunk upload carried credentials"
+    );
+    assert!(
+        http.finalized.get(),
+        "a direct upload left the file uncommitted"
+    );
+
+    // What landed in the bucket is what the file decrypts back to, so the
+    // direct path is not quietly writing something the read side cannot use.
+    let dl = MockProgressReporter::new();
+    let downloaded = crate::download::download_file(
+        &http,
+        &dl,
+        &test_auth(),
+        "direct-up",
+        original.len() as u64,
+        chunk_count,
+        &test_key(),
+        cryptfns::cipher::DEFAULT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(downloaded, original);
+}
+
+/// An upload manifest shorter than the file leaves the rest on the relaying
+/// route, and the file is still committed because part of it went direct.
+#[tokio::test(flavor = "current_thread")]
+async fn a_short_upload_manifest_relays_the_rest() {
+    let original = vec![4u8; CHUNK_SIZE_BYTES as usize * 3 + 5];
+    let http = MockHttpClient::new();
+    let source = MockDataSource::new(original.clone());
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "partial-up",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket.example.com/obj/000000.enc".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        http.requested_urls
+            .borrow()
+            .iter()
+            .any(|u| u.starts_with("https://bucket.example.com/")),
+        "the covered chunk should have gone to the bucket"
+    );
+    assert!(
+        http.upload_count() > 1,
+        "the uncovered chunks should have gone through the server"
+    );
+    assert!(http.finalized.get());
+}
+
+/// A manifest of nothing but empty entries relays every chunk — but it is
+/// still a direct manifest, so the client says finalize anyway. A resume whose
+/// missing chunks all relay leaves the server's stored count incomplete (the
+/// chunks a previous run wrote direct were never counted), so nobody else can
+/// commit the file; the server treats a redundant finalize as a no-op, which
+/// makes saying it unconditionally the safe side of this.
+#[tokio::test(flavor = "current_thread")]
+async fn an_empty_upload_manifest_entry_relays() {
+    let original = vec![1u8; 512];
+    let http = MockHttpClient::new();
+    let source = MockDataSource::new(original.clone());
+    let up = MockProgressReporter::new();
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &up,
+        &test_auth(),
+        "empty-up",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&[String::new()]),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        http.requested_urls
+            .borrow()
+            .iter()
+            .all(|u| !u.starts_with("https://")),
+        "an empty manifest entry should not have produced a bucket request"
+    );
+    assert!(
+        http.finalized.get(),
+        "a direct manifest was in play, so the client owes the finalize"
+    );
+}
+
+/// The sizes declared when asking for upload URLs have to be the sizes the
+/// uploader goes on to produce: the server signs each one into its URL and the
+/// bucket refuses a body of any other length.
+#[test]
+fn declared_chunk_sizes_match_what_encryption_produces() {
+    for cipher in ["aegis128l", "aegis256", "ascon128a", "chacha20poly1305"] {
+        for total_size in [0u64, 1, 512, CHUNK_SIZE_BYTES, CHUNK_SIZE_BYTES * 2 + 17] {
+            let declared = crate::upload::encrypted_chunk_sizes(cipher, total_size).unwrap();
+            let parsed = cryptfns::cipher::Cipher::from_str(cipher).unwrap();
+            let key = parsed.generate_key().unwrap();
+
+            assert_eq!(declared.len() as u64, compute_chunk_count(total_size));
+
+            let mut accounted = 0u64;
+            for (chunk, declared_size) in declared.iter().enumerate() {
+                let plaintext_len = (total_size - accounted).min(CHUNK_SIZE_BYTES);
+                accounted += plaintext_len;
+
+                let actual = parsed
+                    .encrypt_chunk(&key, chunk as u64, vec![0u8; plaintext_len as usize])
+                    .unwrap()
+                    .len() as u64;
+
+                assert_eq!(
+                    *declared_size, actual,
+                    "{cipher} chunk {chunk} of a {total_size}-byte file"
+                );
+            }
+            assert_eq!(accounted, total_size);
+        }
+    }
+}
+
+/// The direct arm's failure handling, which no test above exercises: a bucket
+/// that sheds load on every attempt must cost the upload its speed, never its
+/// success. The chunk falls through to the relaying route and the file still
+/// commits.
+#[tokio::test(flavor = "current_thread")]
+async fn direct_put_exhausted_retries_fall_through_to_relay() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    // One more failure than the retry budget, so every direct attempt fails.
+    http.direct_put_failures.set(MAX_UPLOAD_RETRIES + 1);
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f-direct-fail",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket/0".into()]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        http.requested_urls.borrow().len(),
+        MAX_UPLOAD_RETRIES as usize + 1,
+        "every direct attempt hit the same URL before giving up"
+    );
+    assert!(
+        http.stored_chunks.borrow().contains_key(&0),
+        "the chunk landed through the relay"
+    );
+    assert!(http.finalized.get(), "a direct manifest still finalizes");
+}
+
+/// A single transient bucket failure recovers on the direct path itself:
+/// the retry succeeds and the relaying route is never involved.
+#[tokio::test(flavor = "current_thread")]
+async fn direct_put_transient_failure_recovers_directly() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    http.direct_put_failures.set(1);
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f-direct-retry",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket/0".into()]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.requested_urls.borrow().len(), 2);
+    assert!(http.stored_chunks.borrow().contains_key(&0));
+    assert!(http.finalized.get());
+}
+
+/// Finalize is the one request that commits a fully-stored upload; a single
+/// transient failure there must be retried away rather than marking landed
+/// gigabytes as failed.
+#[tokio::test(flavor = "current_thread")]
+async fn finalize_transient_failure_is_retried() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    http.finalize_failures.set(1);
+
+    crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f-finalize-retry",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket/0".into()]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(http.finalize_calls.get(), 2);
+    assert!(http.finalized.get());
+}
+
+/// Past the retry budget the failure is surfaced, not swallowed: the caller
+/// must know the version pointer never moved.
+#[tokio::test(flavor = "current_thread")]
+async fn finalize_exhausted_retries_surface_the_error() {
+    let data = vec![7u8; 256];
+    let source = MockDataSource::new(data);
+    let http = MockHttpClient::new();
+    let progress = MockProgressReporter::new();
+
+    http.finalize_failures.set(MAX_UPLOAD_RETRIES + 1);
+
+    let result = crate::upload::upload_file(
+        &http,
+        &source,
+        &progress,
+        &test_auth(),
+        "f-finalize-dead",
+        &test_key(),
+        &[],
+        UploadHashOptions::default(),
+        None,
+        cryptfns::cipher::DEFAULT,
+        Some(&["https://bucket/0".into()]),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(http.finalize_calls.get(), MAX_UPLOAD_RETRIES + 1);
+    assert!(!http.finalized.get());
+    // Reported, not just returned: the host has already been told every chunk
+    // landed, so a commit that fails has to arrive on the channel it watches
+    // or the upload it is showing simply stops moving while the file stays
+    // uncommitted.
+    assert!(
+        progress
+            .events()
+            .iter()
+            .any(|event| matches!(event, ProgressEvent::Error { .. })),
+        "a failed commit was never reported to the host"
+    );
+}

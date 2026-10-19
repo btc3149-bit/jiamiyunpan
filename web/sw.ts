@@ -1,0 +1,407 @@
+import {
+  TransferUploader,
+  TransferDownloader,
+  aes_encrypt,
+  aes_decrypt
+} from './node_modules/transfer/transfer.js'
+import { buildDownloader } from '!/storage/download/downloader'
+// @ts-ignore — resolved by the wasm plugin; carries the module's linear memory.
+import { memory as wasmMemory } from './node_modules/transfer/transfer_bg.wasm'
+import * as logger from '!/logger'
+
+import type { ApiTransfer, ErrorResponse } from './services/api'
+import type {
+  DownloadBytesMessage,
+  DownloadBytesResponseMessage,
+  DownloadCompletedResponseMessage,
+  DownloadFileMessage,
+  DownloadProgressResponseMessage,
+  UploadAppFile,
+  UploadChunkResponseMessage,
+  UploadFileMessage,
+  WorkerErrorType
+} from './types'
+
+logger.debug(`[sw] Worker initialized (${self.name || 'unnamed'})`)
+
+self.canceled = {
+  upload: [],
+  download: []
+}
+
+onmessage = async (message: MessageEvent<any>) => {
+  const msgType = message.data?.type || 'unknown'
+  if (!String(msgType).includes('upload')) {
+    logger.debug(`[sw:${self.name || '?'}] received message:`, msgType)
+  }
+
+  if (message.data?.type === 'ping') {
+    self.__IDENTITY = message.data?.name || undefined
+    postMessage({ type: 'pong' })
+  }
+
+  // Debug overlay poll. Linear memory only ever grows, so this doubles as
+  // the worker's high-water mark — the number to watch against the wasm32
+  // 4 GB ceiling on large transfers.
+  if (message.data?.type === 'debug-stats') {
+    postMessage({
+      type: 'debug-stats',
+      response: {
+        name: self.__IDENTITY || message.data?.name || '?',
+        wasmBytes: (wasmMemory as WebAssembly.Memory).buffer.byteLength
+      }
+    })
+  }
+
+  if (message.data?.type === 'encrypt' || message.data?.type === 'decrypt') {
+    handleCrypto(
+      message.data.type,
+      message.data.message.id,
+      message.data.message.data,
+      message.data.message.key
+    )
+  }
+
+  if (message.data?.type === 'cancel') {
+    const type = message.data.kind
+    if (type === 'upload') {
+      self.canceled.upload.push(message.data.id)
+    } else if (type === 'download') {
+      self.canceled.download.push(message.data.id)
+    }
+  }
+
+  if (message.data?.type === 'upload-file') {
+    handleUploadFile(message.data.apiTransfer, message.data.message)
+  }
+
+  if (message.data?.type === 'download-file') {
+    handleDownloadFile(message.data.apiTransfer, message.data.message)
+  }
+
+  if (message.data?.type === 'download-bytes') {
+    handleDownloadBytes(message.data.apiTransfer, message.data.message)
+  }
+}
+
+// The wasm import wraps this whole module in an async initializer, so the
+// worker exists — and accepts messages — for as long as the crypto module
+// takes to compile before the handler above is attached. Anything delivered
+// in that window is dropped. The spawner holds messages back until this
+// announcement instead (see worker-gate.ts).
+postMessage({ type: 'ready' })
+
+/**
+ * Answer a request for decrypted bytes — the whole file, or one chunk.
+ *
+ * The transfer never touches the page's thread, which is the point: a preview
+ * decrypting 200 MB used to do it between animation frames. Errors come back
+ * as a reply rather than an exception, because the caller is a promise on the
+ * other side of a message port.
+ */
+async function handleDownloadBytes(
+  apiTransfer: ApiTransfer,
+  { request, spec, chunk }: DownloadBytesMessage
+) {
+  let downloader: TransferDownloader | undefined
+  try {
+    downloader = buildDownloader(spec, apiTransfer)
+
+    const bytes =
+      chunk === undefined
+        ? await downloader.download(
+            () => {},
+            (fileId: string) => self.canceled?.download?.includes(fileId) ?? false
+          )
+        : await downloader.downloadChunk(chunk, undefined)
+
+    postMessage({
+      type: 'download-bytes',
+      response: { request, bytes } as DownloadBytesResponseMessage
+    })
+  } catch (err) {
+    logger.error(`[sw:bytes] "${spec.id}" failed:`, err)
+    postMessage({
+      type: 'download-bytes',
+      response: { request, error: handleError(err as Error) } as DownloadBytesResponseMessage
+    })
+  } finally {
+    // Consume the cancel the same way `handleDownloadFile` does. A cancel
+    // that raced completion would otherwise sit in the list forever and
+    // silently abort every later byte-read of the same file.
+    const idx = self.canceled?.download?.indexOf(spec.id) ?? -1
+    if (idx !== -1) self.canceled.download.splice(idx, 1)
+    try {
+      downloader?.free()
+    } catch {
+      /* ignore errors during cleanup */
+    }
+  }
+}
+
+async function handleCrypto(
+  type: 'encrypt' | 'decrypt',
+  id: string,
+  data: Uint8Array,
+  key: Uint8Array
+) {
+  logger.debug('In worker, handling crypto', type, id)
+
+  const result = type === 'encrypt' ? aes_encrypt(key, data) : aes_decrypt(key, data)
+
+  logger.debug('In worker, handling crypto, posting message', type, id)
+
+  postMessage({
+    type,
+    message: { id, result }
+  })
+}
+
+async function handleUploadFile(
+  apiTransfer: ApiTransfer,
+  { transferableUploadedChunks, transferableFile, directUrls }: UploadFileMessage
+) {
+  const file = transferableFile as UploadAppFile
+  const t0 = performance.now()
+  const uploadedSet = new Set<number>(file.uploaded_chunks || [])
+  const startedAt = file.started_upload_at || new Date().toISOString()
+
+  // Emit an immediate "upload started" progress so the UI updates right away
+  // (the transfer layer only reports progress on completed chunk uploads).
+  postMessage({
+    type: 'upload-progress',
+    response: {
+      transferableFile: {
+        ...file,
+        uploaded_chunks: Array.from(uploadedSet),
+        chunks_stored: uploadedSet.size,
+        started_upload_at: startedAt,
+        last_progress_at: new Date().toISOString()
+      },
+      chunk: 0,
+      attempt: 0,
+      isDone: false
+    } as UploadChunkResponseMessage
+  })
+
+  let uploader: TransferUploader | undefined
+  try {
+    const baseUrl = apiTransfer.apiUrl || ''
+    const jwtToken = apiTransfer.jwtToken || undefined
+    const refreshToken = apiTransfer.refreshToken || undefined
+    const cipher = file.cipher
+
+    // Disable all hashes in WASM — SHA-256 is computed by the top-level HASH worker
+    // spawned from main.ts and reported back through queue.ts independently.
+    const hashDisableMask = 1 | 2 | 4 | 8
+
+    const reportUploadProgress = (progressJson: string) => {
+      const progress = JSON.parse(progressJson)
+
+      if (progress.type === 'upload' && progress.chunk !== undefined) {
+        uploadedSet.add(progress.chunk)
+      }
+
+      postMessage({
+        type: 'upload-progress',
+        response: {
+          transferableFile: {
+            ...file,
+            uploaded_chunks: Array.from(uploadedSet),
+            chunks_stored: uploadedSet.size,
+            started_upload_at: startedAt,
+            last_progress_at: new Date().toISOString()
+          },
+          chunk: progress.chunk,
+          attempt: 0,
+          // `complete` is the only signal that arrives after the commit, so
+          // it is what "done" means on the direct path: the last chunk
+          // reports `is_done: false` there, because a bucket write leaves the
+          // file uncommitted until finalize succeeds. On the relaying path
+          // both fire and either would do.
+          isDone: progress.is_done === true || progress.type === 'complete',
+          error: progress.type === 'error' ? { context: progress.error } : undefined
+        } as UploadChunkResponseMessage
+      })
+    }
+
+    uploader = new TransferUploader(
+      file.id,
+      baseUrl,
+      jwtToken,
+      refreshToken,
+      file.key as Uint8Array
+    )
+    uploader.set_uploaded_chunks(new Uint32Array(transferableUploadedChunks || []))
+    uploader.set_hash_mask(hashDisableMask)
+    uploader.set_cipher(cipher)
+
+    // An empty manifest is meaningful: it is a resume with nothing left to
+    // PUT, kept on the direct path so the crate still delivers the finalize
+    // its predecessor never got to. Only `undefined` means "relay".
+    if (directUrls) {
+      uploader.set_direct_urls(directUrls)
+    }
+
+    await uploader.upload(
+      file.file as File,
+      undefined,
+      reportUploadProgress,
+      (fileId: string) => self.canceled?.upload?.includes(fileId) ?? false
+    )
+    uploader.free()
+    uploader = undefined
+
+    logger.info(`[sw:upload] "${file.name}" completed in ${(performance.now() - t0).toFixed(0)}ms`)
+  } catch (err) {
+    try { uploader?.free() } catch { /* ignore errors during cleanup */ }
+    uploader = undefined
+    logger.error(
+      `[sw:upload] "${file.name}" failed after ${(performance.now() - t0).toFixed(0)}ms:`,
+      err
+    )
+    postMessage({
+      type: 'upload-progress',
+      response: {
+        transferableFile: file,
+        attempt: 0,
+        isDone: false,
+        error: handleError(err as Error)
+      } as UploadChunkResponseMessage
+    })
+  } finally {
+    const idx = self.canceled.upload.indexOf(file.id)
+    if (idx !== -1) self.canceled.upload.splice(idx, 1)
+  }
+}
+
+async function handleDownloadFile(
+  apiTransfer: ApiTransfer,
+  { transferableFile, directUrls }: DownloadFileMessage
+) {
+  const t0 = performance.now()
+  logger.info(
+    `[sw:download] starting "${transferableFile.name}" (${transferableFile.id}), ${transferableFile.chunks} chunks`
+  )
+
+  let downloader: TransferDownloader | undefined
+  try {
+    const baseUrl = apiTransfer.apiUrl || ''
+    const jwtToken = apiTransfer.jwtToken || undefined
+    const refreshToken = apiTransfer.refreshToken || undefined
+
+    const cipher = transferableFile.cipher
+
+    downloader = buildDownloader(
+      {
+        id: transferableFile.id,
+        size: transferableFile.size || 0,
+        chunks: transferableFile.chunks || 0,
+        cipher,
+        key: transferableFile.key as Uint8Array,
+        directUrls
+      },
+      { apiUrl: baseUrl, jwtToken, refreshToken }
+    )
+
+    // Each chunk becomes its own small Blob the moment it arrives, moving
+    // it into browser-managed blob storage (disk-backed for large files)
+    // and out of both wasm linear memory — which is capped at 4 GB and
+    // never returned once grown — and the JS heap. The final Blob below
+    // only references the parts.
+    const parts: Blob[] = []
+    await downloader.downloadStreaming(
+      (progressJson: string) => {
+        const progress = JSON.parse(progressJson)
+
+        if (progress.type === 'download') {
+          logger.debug(
+            `[sw:download] "${transferableFile.name}" progress: ${progress.bytes_downloaded} bytes`
+          )
+          postMessage({
+            type: 'download-progress',
+            response: {
+              transferableFile,
+              chunkBytes: progress.bytes_downloaded,
+              stage: 'downloading'
+            } as DownloadProgressResponseMessage
+          })
+        }
+
+        // The pipeline is done receiving; what remains is the final buffer
+        // copy out of WASM and the blob handoff, which takes real time on
+        // large files. Surface it instead of letting the bar sit at 100%.
+        if (progress.type === 'complete') {
+          postMessage({
+            type: 'download-progress',
+            response: {
+              transferableFile,
+              chunkBytes: transferableFile.size || 0,
+              stage: 'processing'
+            } as DownloadProgressResponseMessage
+          })
+        }
+      },
+      (fileId: string) => self.canceled?.download?.includes(fileId) ?? false,
+      (chunk: Uint8Array) => parts.push(new Blob([chunk]))
+    )
+    downloader.free()
+    downloader = undefined
+
+    const blob = new Blob(parts)
+
+    logger.info(
+      `[sw:download] "${transferableFile.name}" completed in ${(performance.now() - t0).toFixed(
+        0
+      )}ms, ${blob.size} bytes`
+    )
+
+    postMessage({
+      type: 'download-completed',
+      response: {
+        transferableFile,
+        blob
+      } as DownloadCompletedResponseMessage
+    })
+  } catch (err) {
+    try { downloader?.free() } catch { /* ignore errors during cleanup */ }
+    downloader = undefined
+    logger.error(
+      `[sw:download] "${transferableFile.name}" failed after ${(performance.now() - t0).toFixed(
+        0
+      )}ms:`,
+      err
+    )
+    const error = err as ErrorResponse<unknown>
+
+    postMessage({
+      type: 'download-progress',
+      response: {
+        transferableFile,
+        chunkBytes: 0,
+        error: handleError(error)
+      } as DownloadProgressResponseMessage
+    })
+  } finally {
+    const idx = self.canceled.download.indexOf(transferableFile.id)
+    if (idx !== -1) self.canceled.download.splice(idx, 1)
+  }
+}
+
+function handleError(error?: undefined | Error | ErrorResponse<any> | string): WorkerErrorType {
+  if (!error) return
+
+  if (typeof error === 'string') {
+    return { context: error }
+  }
+
+  if (error instanceof Error) {
+    return {
+      context:
+        (error as ErrorResponse<unknown>).validation ||
+        (error as ErrorResponse<unknown>).description ||
+        error.message,
+      stack: error.stack
+    }
+  }
+}

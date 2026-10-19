@@ -1,0 +1,135 @@
+use error::{AppResult, Error};
+use fs::prelude::*;
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, DeriveEntityModel, Eq)]
+#[sea_orm(table_name = "files")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    pub name_hash: String,
+    pub encrypted_name: String,
+    pub encrypted_thumbnail: Option<String>,
+    pub mime: String,
+    pub size: Option<i64>,
+    pub chunks: Option<i64>,
+    pub chunks_stored: Option<i64>,
+    pub file_id: Option<Uuid>,
+    pub md5: Option<String>,
+    pub sha1: Option<String>,
+    pub sha256: Option<String>,
+    pub blake2b: Option<String>,
+    pub cipher: String,
+    pub editable: bool,
+    pub file_modified_at: i64,
+    pub created_at: i64,
+    pub finished_upload_at: Option<i64>,
+    /// Pointer to the version of chunks readers should resolve. Always set
+    /// (defaults to 1 on insert). All download/tar/metadata reads use this.
+    pub active_version: i32,
+    /// Set to `active_version + 1` while an edit is in progress; chunk
+    /// uploads land in `v{pending_version}/`. Atomically swapped to
+    /// `active_version` on successful finalize. NULL when no edit is in
+    /// progress; readers ignore it.
+    pub pending_version: Option<i32>,
+    /// Total chunks expected for the in-progress upload. NULL when no edit
+    /// is in progress. Auto-finalize fires when `chunks_stored ==
+    /// pending_chunks`. Kept distinct from `chunks` so that `chunks` always
+    /// reflects what readers will actually fetch from the active version.
+    pub pending_chunks: Option<i64>,
+    /// Total size in bytes for the in-progress upload (client-supplied at
+    /// `replaceContent` time). NULL when no edit is in progress. Copied
+    /// into `size` and cleared on successful finalize. Same rationale as
+    /// `pending_chunks` — keeps `size` accurate for active-version readers
+    /// during a save.
+    pub pending_size: Option<i64>,
+    /// Last time the folder's share-member set changed. Bumped on every
+    /// add/remove/role-change. NULL for non-folder rows and folders that
+    /// have never been shared. The editable-folder TOCTOU defense
+    /// compares the uploader's snapshot against this value.
+    pub last_membership_change_at: Option<i64>,
+    /// RSA-PSS-SHA256 signature over the canonical sorted member list,
+    /// produced by the actor that most recently mutated the membership
+    /// (folder owner or any current Co-owner). Returned verbatim from
+    /// the `/api/shares/folder/{F}/members` endpoint; verified
+    /// client-side before any multi-key upload. NULL until the first
+    /// client writes a signed list.
+    pub members_list_signature: Option<Vec<u8>>,
+    /// Timestamp covered by `members_list_signature` (and embedded in
+    /// the signed payload). NULL while the signature itself is NULL.
+    pub members_list_signed_at: Option<i64>,
+    /// User who produced `members_list_signature`. FK to `users.id`,
+    /// SET NULL on actor deletion so the audit trail survives.
+    pub members_list_signed_by_user_id: Option<Uuid>,
+}
+
+impl IntoFilename for Model {
+    fn filename(&self) -> AppResult<Filename> {
+        if self.mime.as_str() == "dir" {
+            return Err(Error::BadRequest(
+                "cannot_get_filename_from_dir".to_string(),
+            ));
+        }
+
+        Ok(Filename::new(self.id).with_timestamp(self.created_at))
+    }
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::FileId",
+        to = "Column::Id",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    Files,
+    #[sea_orm(has_many = "super::user_files::Entity")]
+    UserFiles,
+    #[sea_orm(has_many = "super::file_tokens::Entity")]
+    FileTokens,
+    #[sea_orm(has_many = "super::links::Entity")]
+    Links,
+    #[sea_orm(has_many = "super::file_versions::Entity")]
+    FileVersions,
+}
+
+pub struct ChildFilesLink;
+
+impl Linked for ChildFilesLink {
+    type FromEntity = Entity;
+
+    type ToEntity = Entity;
+
+    fn link(&self) -> Vec<RelationDef> {
+        vec![Relation::Files.def()]
+    }
+}
+
+impl Related<Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Files.def()
+    }
+}
+
+impl Related<super::user_files::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::UserFiles.def()
+    }
+}
+
+impl Related<super::file_tokens::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::FileTokens.def()
+    }
+}
+
+impl Related<super::file_versions::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::FileVersions.def()
+    }
+}
+
+impl ActiveModelBehavior for ActiveModel {}

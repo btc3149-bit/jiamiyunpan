@@ -1,0 +1,74 @@
+<script setup lang="ts">
+import LayoutAuthenticatedWithLoader from '@/layouts/LayoutAuthenticatedWithLoader.vue'
+import SectionMain from '@/components/ui/SectionMain.vue'
+import MyDetails from './index/MyDetails.vue'
+import StorageStats from './index/StorageStats.vue'
+import SharingPreferences from './index/SharingPreferences.vue'
+import LanguagePreferences from './index/LanguagePreferences.vue'
+import RecoveryKey from './index/RecoveryKey.vue'
+import ConnectDevice from './index/ConnectDevice.vue'
+import EnableTfaModal from '@/components/modals/EnableTfaModal.vue'
+import DisableTfaModal from '@/components/modals/DisableTfaModal.vue'
+import { ref } from 'vue'
+import ActivityInner from './index/ActivityInner.vue'
+
+const disableTfaModal = ref(false)
+const enableTfaModal = ref(false)
+</script>
+<template>
+  <LayoutAuthenticatedWithLoader v-slot="{ authenticated }">
+    <EnableTfaModal
+      v-if="enableTfaModal && authenticated"
+      @confirm="enableTfaModal = false"
+      @cancel="enableTfaModal = false"
+      v-model="authenticated.user"
+    />
+    <DisableTfaModal
+      v-if="disableTfaModal && authenticated"
+      @confirm="disableTfaModal = false"
+      @cancel="disableTfaModal = false"
+      v-model="authenticated.user"
+    />
+    <Suspense>
+      <SectionMain v-if="authenticated">
+        <div class="mb-8">
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.sections.profile') }}</h2>
+          <div class="flex flex-col lg:flex-row gap-6">
+            <MyDetails
+              class="w-full lg:w-7/12"
+              :user="authenticated.user"
+              @disable-tfa="disableTfaModal = true"
+              @enable-tfa="enableTfaModal = true"
+            />
+            <StorageStats class="w-full lg:w-5/12" />
+          </div>
+        </div>
+
+        <div class="mb-8">
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.sections.security') }}</h2>
+          <RecoveryKey class="w-full" />
+        </div>
+
+        <div class="mb-8">
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.sections.devices') }}</h2>
+          <ConnectDevice :user="authenticated.user" class="w-full" />
+        </div>
+
+        <div class="mb-8">
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.sections.sharing') }}</h2>
+          <SharingPreferences :user="authenticated.user" class="w-full" />
+        </div>
+
+        <div class="mb-8">
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.preferences') }}</h2>
+          <LanguagePreferences class="w-full" />
+        </div>
+
+        <div>
+          <h2 class="text-xs font-semibold text-brownish-400 dark:text-brownish-50 mb-3 px-1">{{ $t('account.sections.sessions') }}</h2>
+          <ActivityInner class="w-full" />
+        </div>
+      </SectionMain>
+    </Suspense>
+  </LayoutAuthenticatedWithLoader>
+</template>

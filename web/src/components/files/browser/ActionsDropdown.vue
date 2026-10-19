@@ -1,0 +1,190 @@
+<script setup lang="ts">
+import type { AppFile } from 'types'
+import { mdiDotsVertical } from '@mdi/js'
+import ActionsButtons from './ActionsButtons.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { vOnClickOutside } from '@vueuse/components'
+
+const props = defineProps<{
+  modelValue: AppFile
+  hideDelete?: boolean
+  share?: boolean
+  disabled?: boolean
+  class?: string
+}>()
+
+const tracker = ref()
+const menu = ref()
+const menuWidth = ref(0)
+const menuHeight = ref(0)
+
+const emits = defineEmits<{
+  (event: 'remove', file: AppFile): void
+  (event: 'details', file: AppFile): void
+  (event: 'rename', file: AppFile): void
+  (event: 'sharing', file: AppFile): void
+  (event: 'download', file: AppFile): void
+  (event: 'fork', file: AppFile): void
+  (event: 'leave', file: AppFile): void
+  (event: 'update:modelValue', value: AppFile): void
+}>()
+
+const file = computed({
+  get: () => props.modelValue,
+  set: (v: AppFile) => emits('update:modelValue', v)
+})
+
+const remove = () => {
+  close()
+  emits('remove', file.value)
+}
+
+const rename = () => {
+  close()
+  emits('rename', file.value)
+}
+
+const details = () => {
+  close()
+  emits('details', file.value)
+}
+
+const download = () => {
+  close()
+  emits('download', file.value)
+}
+
+const sharing = () => {
+  close()
+  emits('sharing', file.value)
+}
+
+const fork = () => {
+  close()
+  emits('fork', file.value)
+}
+
+const leave = () => {
+  close()
+  emits('leave', file.value)
+}
+
+/**
+ * Handle closing the dropdown
+ */
+const close = () => {
+  if (menu.value?.style?.display === 'block') {
+    menu.value.style.display = 'none'
+  }
+}
+
+/**
+ * Handle opening the context menu
+ */
+const open = (event: MouseEvent) => {
+  if (props.disabled) {
+    return
+  }
+
+  if (!tracker.value) {
+    return
+  }
+
+  if (!menu.value) {
+    return
+  }
+
+  if (menu.value?.style?.display === 'block') {
+    return
+  }
+
+  if (!menuWidth.value || !menuHeight.value) {
+    menu.value.style.visibility = 'hidden'
+    menu.value.style.display = 'block'
+    menuWidth.value = menu.value.offsetWidth
+    menuHeight.value = menu.value.offsetHeight
+    menu.value.removeAttribute('style')
+  }
+
+  // Keyboard activation fires a click at (0,0); anchor the menu to the
+  // trigger button instead so it doesn't open in the page corner.
+  let pageX = event.pageX
+  let pageY = event.pageY
+  if (!pageX && !pageY) {
+    const rect = tracker.value.getBoundingClientRect()
+    pageX = rect.left + window.scrollX + rect.width / 2
+    pageY = rect.top + window.scrollY + rect.height / 2
+  }
+
+  if (menuWidth.value + pageX >= window.innerWidth) {
+    menu.value.style.left = pageX - menuWidth.value + 2 + 'px'
+  } else {
+    menu.value.style.left = pageX - 2 + 'px'
+  }
+
+  if (menuHeight.value + pageY >= window.innerHeight) {
+    menu.value.style.top = pageY - menuHeight.value + 2 + 'px'
+  } else {
+    menu.value.style.top = pageY - 2 + 'px'
+  }
+
+  menu.value.style.display = 'block'
+}
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape') {
+    close()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+</script>
+<template>
+  <div ref="tracker" v-on-click-outside="close" :class="props.class" :key="`${file.id}-tracker`">
+    <slot>
+      <BaseButton
+        class="ml-2 hidden sm:block float-right"
+        color="dark"
+        :icon="mdiDotsVertical"
+        small
+        :disabled="props.disabled"
+        :title="$t('common.actions')"
+        :aria-label="$t('common.actions')"
+        aria-haspopup="menu"
+        @click="open"
+        name="actions-dropdown"
+      />
+    </slot>
+    <div
+      ref="menu"
+      :key="`${file.id}-menu`"
+      class="floating-menu bg-white dark:bg-brownish-700 border border-paper-300 dark:border-brownish-600 rounded-md shadow-lg max-h-modal w-max min-w-[10rem] max-w-[16rem] z-50 py-2 m-4"
+    >
+      <ActionsButtons
+        v-model="file"
+        :hide-delete="hideDelete"
+        :share="props.share"
+        @remove="remove"
+        @details="details"
+        @download="download"
+        @rename="rename"
+        @sharing="sharing"
+        @fork="fork"
+        @leave="leave"
+      />
+    </div>
+  </div>
+</template>
+<style scoped lang="postcss">
+.floating-menu {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  z-index: 50;
+}
+</style>

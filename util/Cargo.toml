@@ -1,0 +1,26 @@
+[package]
+name = "util"
+version = "1.0.1"
+edition = "2021"
+rust-version = "1.91"
+authors = ["btc3149-bit <btc3149-bit@users.noreply.github.com>"]
+readme = "README.md"
+license-file = "../LICENSE.md"
+description = "Simple helper function that are used all around the application and don't have a home in any crate in particular"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "util"
+path = "src/lib.rs"
+
+[dependencies]
+zxcvbn = { workspace = true }
+google-authenticator = { workspace = true } # new version requires building libs so we'll stay on this one
+bcrypt = { workspace = true }
+chrono = { workspace = true }
+qstring = { workspace = true }
+actix-web = { workspace = true }
+url = { workspace = true }
+
+error = { path = "../error" }

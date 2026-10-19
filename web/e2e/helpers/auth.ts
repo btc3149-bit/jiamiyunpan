@@ -1,0 +1,157 @@
+import type { Page } from '@playwright/test'
+import { authenticator } from 'otplib'
+
+export function randomEmail() {
+  return `test+${Math.floor(Math.random() * 1e9)}@test.com`
+}
+
+export function randomPassword() {
+  return `strong-password-${Math.floor(Math.random() * 1e9)}`
+}
+
+/**
+ * Clear the one-time modal that offers to set up the mobile app. It covers the
+ * whole app for a freshly signed-in user, so every flow that logs in has to get
+ * past it before it can touch anything else. A no-op once dismissed.
+ */
+export async function dismissConnectPrompt(page: Page) {
+  // Two shapes: a QR code on a desktop, an open-the-app button on a phone.
+  const prompt = page
+    .getByTestId('connect-prompt-qr')
+    .or(page.getByTestId('connect-prompt-open-app'))
+    .first()
+
+  if (!(await prompt.isVisible().catch(() => false))) return
+
+  // Scoped to the prompt's own modal: the re-index modal's "Done" can be on
+  // screen at the same time, and an unscoped role query would match both.
+  await page
+    .getByTestId('connect-app-modal')
+    .getByRole('button', { name: /^(Done|Continue in the browser)$/ })
+    .click()
+  await prompt.waitFor({ state: 'hidden' })
+}
+
+/**
+ * Register a new user and skip 2FA.
+ * Returns the captured recovery key (curve bundle) along with the credentials.
+ * `privateKey` is the recovery bundle — the material accepted by
+ * login-with-private-key, kept under that name so callers stay unchanged.
+ */
+export async function createUser(page: Page, email: string, password: string) {
+  await page.goto('/auth/register')
+  await page.locator('#email').fill(email)
+  await page.locator('#password').fill(password)
+  await page.locator('#confirm_password').fill(password)
+  await page.getByRole('button', { name: 'Next' }).click()
+  await page.waitForURL('**/register/key')
+
+  const privateKey = await page.locator('#recovery_bundle').inputValue()
+  await page.locator('#i_have_stored_my_private_key').check()
+  await page.getByRole('button', { name: 'Next' }).click()
+  await page.waitForURL('**/register/two-factor')
+  await page.getByRole('button', { name: 'Skip' }).click()
+  // Wait until the app has fully redirected to the file browser
+  await page.waitForURL('**/', { waitUntil: 'load' })
+  await dismissConnectPrompt(page)
+
+  return { email, password, privateKey }
+}
+
+/**
+ * Log out the currently authenticated user.
+ * Waits for redirect to the login page.
+ */
+export async function logout(page: Page) {
+  // Logout is rendered as a sidebar button (not an <a> link)
+  await page.locator('button:has-text("Logout"), a:has-text("Logout")').first().click()
+  await page.waitForURL('**/auth/login')
+}
+
+/**
+ * Register a new user with 2FA enabled.
+ * Returns the OTP secret and private key along with credentials.
+ */
+export async function createUserWithTwoFactor(page: Page, email: string, password: string) {
+  await page.goto('/auth/register')
+  await page.locator('#email').fill(email)
+  await page.locator('#password').fill(password)
+  await page.locator('#confirm_password').fill(password)
+  await page.getByRole('button', { name: 'Next' }).click()
+  await page.waitForURL('**/register/key')
+
+  const privateKey = await page.locator('#recovery_bundle').inputValue()
+  await page.locator('#i_have_stored_my_private_key').check()
+  await page.getByRole('button', { name: 'Next' }).click()
+  await page.waitForURL('**/register/two-factor')
+
+  const secret = await page.locator('#secret').inputValue()
+  const token = authenticator.generate(secret)
+  await page.locator('#token').fill(token)
+  await page.getByRole('button', { name: 'Register with 2FA' }).click()
+  await page.waitForURL('**/')
+  await dismissConnectPrompt(page)
+
+  return { email, password, privateKey, secret }
+}
+
+/**
+ * Log in with email and password (no 2FA).
+ * Waits for redirect to the files view.
+ *
+ * When `options.remember` is true, the login form's Remember me checkbox is
+ * ticked so the encrypted private key gets persisted to local storage. That
+ * lets a subsequent `page.goto(...)` reload survive — the SPA's refresh path
+ * reads the key from storage instead of in-memory state that resets on a
+ * fresh page load.
+ */
+export async function loginAsUser(
+  page: Page,
+  email: string,
+  password: string,
+  options: { remember?: boolean } = {}
+) {
+  await page.goto('/auth/login')
+  await page.locator('#email').fill(email)
+  await page.locator('#password').fill(password)
+  if (options.remember) {
+    await page.locator('input[name="remember"]').check()
+  }
+  await page.getByRole('button', { name: 'Login' }).click()
+  await page.waitForURL('**/')
+  await dismissConnectPrompt(page)
+}
+
+/**
+ * Log in with email, password, and a TOTP token (2FA enabled account).
+ */
+export async function loginWithTwoFactor(page: Page, email: string, password: string, secret: string) {
+  await page.goto('/auth/login')
+  await page.locator('#email').fill(email)
+  await page.locator('#password').fill(password)
+  await page.getByRole('button', { name: 'Login' }).click()
+
+  // Credentials alone are rejected for a 2FA account, which is what moves the
+  // form to its second step; the code boxes only exist once that happens.
+  await page.locator('#token-0').waitFor()
+  await page.locator('#token-0').click()
+
+  // Type it the way a person does — focus advances box to box, and the form
+  // submits itself on the sixth digit.
+  await page.keyboard.type(authenticator.generate(secret))
+  await page.waitForURL('**/')
+  await dismissConnectPrompt(page)
+}
+
+/**
+ * Log in using a PEM private key (alternative login method).
+ */
+export async function loginWithPrivateKey(page: Page, privateKey: string) {
+  await page.goto('/auth/login')
+  await page.getByRole('link', { name: 'Login With Private Key' }).click()
+  await page.waitForURL('**/private-key')
+  await page.locator('#privateKey').fill(privateKey)
+  await page.getByRole('button', { name: 'Login' }).click()
+  await page.waitForURL('**/')
+  await dismissConnectPrompt(page)
+}

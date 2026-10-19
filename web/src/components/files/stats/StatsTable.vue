@@ -1,0 +1,56 @@
+<script setup lang="ts">
+import type { Stats } from 'types/admin/files'
+import StatsRow from './StatsRow.vue'
+import SortableName from '@/components/ui/SortableName.vue'
+import { computed, ref } from 'vue'
+
+const props = defineProps<{
+  data: Stats[]
+  max?: number
+}>()
+
+const sort = ref({ sort: 'size', order: 'desc' })
+
+const sortedData = computed(() => {
+  if (!props.data) return []
+
+  if (!sort.value.sort) {
+    return props.data
+  }
+
+  const data = [...props.data]
+
+  data.sort((a, b) => {
+    if (sort.value.sort === 'mime') {
+      return a.mime.localeCompare(b.mime)
+    } else if (sort.value.sort === 'count') {
+      return a.count - b.count
+    } else if (sort.value.sort === 'size') {
+      return a.size - b.size
+    }
+
+    return 0
+  })
+
+  if (sort.value.order === 'desc') {
+    return data.reverse()
+  } else {
+    return data
+  }
+})
+</script>
+<template>
+  <div>
+    <div class="flex items-center gap-2 pb-1.5 mb-0.5 border-b border-paper-200 dark:border-brownish-700/50">
+      <div class="flex-1">
+        <SortableName v-model="sort" name="mime" :label="$t('common.type')" />
+      </div>
+      <SortableName v-model="sort" name="count" :label="$t('files.stats.files')" />
+      <div class="min-w-[3.5rem] shrink-0 text-right">
+        <SortableName class="float-right whitespace-nowrap" v-model="sort" name="size" :label="$t('common.size')" />
+      </div>
+    </div>
+
+    <StatsRow v-for="item in sortedData" :key="item.mime" :data="item" :max="max" />
+  </div>
+</template>

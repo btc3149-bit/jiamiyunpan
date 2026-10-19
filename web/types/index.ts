@@ -1,0 +1,120 @@
+import type { Query } from '../services/api'
+import type { store as downloadStore } from '../services/storage/download'
+import type { store as uploadStore } from '../services/storage/upload'
+import type { store as filesStore } from '../services/storage'
+import type { store as queueStore } from '../services/queue'
+import type { store as cryptoStore } from '../services/crypto'
+import type { store as linksStore } from '../services/links'
+import type {
+  store as sharesStore,
+  trustedFingerprintsStore,
+  capabilitiesStore
+} from '../services/shares'
+import type { store as loginStore } from '../services/auth/login'
+import type { AppFile, UploadAppFile, DownloadAppFile } from './file'
+
+export * from './account'
+export * from './admin'
+export * from './create'
+export * from './cryptfns'
+export * from './file'
+export * from './links'
+export * from './login'
+export * from './queue'
+export * from './register'
+export * from './shares'
+export * from './worker'
+
+export type UploadStore = ReturnType<typeof uploadStore>
+export type DownloadStore = ReturnType<typeof downloadStore>
+export type FilesStore = ReturnType<typeof filesStore>
+export type QueueStore = ReturnType<typeof queueStore>
+export type LoginStore = ReturnType<typeof loginStore>
+export type CryptoStore = ReturnType<typeof cryptoStore>
+export type LinksStore = ReturnType<typeof linksStore>
+export type SharesStore = ReturnType<typeof sharesStore>
+export type TrustedFingerprintsStore = ReturnType<typeof trustedFingerprintsStore>
+export type CapabilitiesStore = ReturnType<typeof capabilitiesStore>
+
+export interface Paginated<T> {
+  data: T[]
+  total: number
+}
+
+export interface Parameters extends Query {
+  dir_id?: string | null
+  order?: 'asc' | 'desc'
+  order_by?: 'modified_at' | 'size'
+  dirs_only?: boolean
+  is_owner?: boolean
+  editable?: boolean
+
+  /** Withhold thumbnail blobs; absent means full rows. */
+  compact?: boolean
+}
+
+export interface SearchQuery {
+  /** Query words tagged under the caller's account-wide key: matches what they own. */
+  root_tags?: string[]
+  /** The same words tagged per file shared *with* the caller, under each file's own key. */
+  file_tags?: string[]
+  /**
+   * The whole query hashed the way file names are hashed at create. A file
+   * whose `name_hash` equals it is the file the user typed the name of; the
+   * server includes and ranks it first regardless of token scores.
+   */
+  name_hash?: string
+  dir_id?: string
+  limit?: number
+  skip?: number
+  editable?: boolean
+
+  /** Withhold thumbnail blobs; absent means full rows. */
+  compact?: boolean
+}
+
+export interface FileResponse {
+  parents?: AppFile[]
+  children: AppFile[]
+}
+
+export interface Stats {
+  mime: string
+  size: number
+  count: number
+}
+
+export interface StorageStatsResponse {
+  stats: Stats[]
+  used_space: number
+  quota?: number
+}
+
+export interface SingleChunk {
+  data: Uint8Array
+  chunk: number
+}
+
+export type IntervalType = ReturnType<typeof setInterval>
+
+export type UploadProgressFunction = (file: UploadAppFile, done: boolean) => Promise<void>
+export type DownloadProgressFunction = (
+  file: AppFile,
+  chunkBytes: number,
+  stage?: 'downloading' | 'processing'
+) => Promise<void>
+
+export interface TransferTokenResponse {
+  token: string
+  expires_at: number
+  file_id: string
+  action: 'upload' | 'download'
+}
+
+export interface HelperType {
+  decrypt(file: AppFile): Promise<AppFile>
+  decrypt(file: AppFile): Promise<AppFile>
+  decrypt(file: UploadAppFile): Promise<UploadAppFile>
+  decrypt(file: DownloadAppFile): Promise<DownloadAppFile>
+  [key: string]: any
+}

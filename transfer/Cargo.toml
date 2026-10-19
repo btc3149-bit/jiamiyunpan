@@ -1,0 +1,74 @@
+[package]
+name = "transfer"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["btc3149-bit <btc3149-bit@users.noreply.github.com>"]
+license-file = "../LICENSE.md"
+repository = "https://github.com/btc3149-bit/jiamiyunpan"
+description = "Upload/download orchestration with client-side encryption, shared between web (WASM), server (native), and mobile (Flutter/FFI) targets"
+
+[lib]
+name = "transfer"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = [
+  "wasm-bindgen",
+  "wasm-bindgen-futures",
+  "web-sys",
+  "js-sys",
+  "serde-wasm-bindgen",
+]
+native = ["reqwest", "tokio"]
+mobile = ["reqwest", "tokio"]
+# Passthrough for the e2e WASM build; forwards to cryptfns' cheap KSF.
+fast-test-kdf = ["cryptfns/fast-test-kdf"]
+
+[dependencies]
+cryptfns = { path = "../cryptfns" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Incremental file hashing (RustCrypto, pure Rust, WASM-compatible)
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+blake2 = "0.10"
+digest = "0.10"
+hex = "0.4"
+futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
+
+# WASM-only
+wasm-bindgen = { version = "0.2.114", optional = true }
+wasm-bindgen-futures = { version = "0.4.47", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+  "Blob",
+  "File",
+  "Headers",
+  "Request",
+  "RequestInit",
+  "RequestMode",
+  "RequestCredentials",
+  "Response",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "Url",
+  "UrlSearchParams",
+  "console",
+] }
+
+# Native-only
+reqwest = { workspace = true, optional = true, features = ["rustls-tls", "json", "stream"] }
+tokio = { workspace = true, optional = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(wasm_bindgen_unstable_test_coverage)"]

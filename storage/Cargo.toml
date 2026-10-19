@@ -1,0 +1,37 @@
+[package]
+name = "storage"
+version = "1.2.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["btc3149-bit <btc3149-bit@users.noreply.github.com>"]
+readme = "README.md"
+license-file = "../LICENSE.md"
+description = "Application storage service that manages files and folders."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+mock = ["context/mock", "entity/mock"]
+
+[dependencies]
+log = { workspace = true }
+actix-web = { workspace = true }
+validr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+cached = { workspace = true }
+futures = { workspace = true }
+num-traits = { workspace = true }
+
+auth = { path = "../auth" }
+context = { path = "../context" }
+cryptfns = { path = "../cryptfns" }
+entity = { path = "../entity" }
+error = { path = "../error" }
+fs = { path = "../fs" }
+util = { path = "../util" }
+
+[dev-dependencies]
+context = { path = "../context", features = ["mock"] }
+entity = { path = "../entity", features = ["mock"] }

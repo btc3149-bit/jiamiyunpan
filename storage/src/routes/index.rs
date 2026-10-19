@@ -1,0 +1,47 @@
+use actix_web::{route, web, HttpResponse};
+use auth::data::claims::Claims;
+use context::Context;
+use error::AppResult;
+use fs::prelude::*;
+
+use crate::{data::query::Query, repository::Repository};
+
+/// List files and directories
+///
+/// Request: [crate::data::query::Query]
+///
+/// Response: [crate::data::response::Response]
+#[route("/api/storage", method = "GET")]
+pub(crate) async fn index(
+    claims: Claims,
+    context: web::Data<Context>,
+    data: web::Query<Query>,
+) -> AppResult<HttpResponse> {
+    let context = context.into_inner();
+
+    let mut response = Repository::new(&context.db)
+        .manage(claims.sub)
+        .find(data.into_inner())
+        .await?;
+
+    for file in response.children.iter_mut() {
+        if file.is_file() {
+            // A finished upload has every chunk by definition — only files
+            // still uploading need the storage backend consulted. Without
+            // this split every listing paid one backend enumeration per
+            // row, which on object storage is a network call per file.
+            if file.finished_upload_at.is_some() {
+                let chunks = file.chunks.unwrap_or(0);
+                file.chunks_stored = Some(chunks);
+                file.uploaded_chunks = Some((0..chunks).collect());
+            } else {
+                let chunks = Fs::new(&context.config).get_uploaded_chunks(file).await?;
+
+                file.chunks_stored = Some(chunks.len() as i64);
+                file.uploaded_chunks = Some(chunks);
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(response))
+}

@@ -1,0 +1,45 @@
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize, Serializer};
+
+fn option_into_bool<S>(x: &Option<Uuid>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_bool(x.is_some())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, DeriveEntityModel, Eq)]
+#[sea_orm(table_name = "sessions")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub device_id: Uuid,
+    pub ip: String,
+    pub user_agent: String,
+    #[serde(skip_deserializing, serialize_with = "option_into_bool")]
+    pub refresh: Option<Uuid>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::UserId",
+        to = "super::users::Column::Id",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    Users,
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Users.def()
+    }
+}
+
+impl ActiveModelBehavior for ActiveModel {}

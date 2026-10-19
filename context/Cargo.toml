@@ -1,0 +1,43 @@
+[package]
+name = "context"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["btc3149-bit <btc3149-bit@users.noreply.github.com>"]
+readme = "README.md"
+license-file = "../LICENSE.md"
+description = "Holder for the entire application context"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "context"
+path = "src/lib.rs"
+
+[features]
+mock = [
+  "config/mock",
+  "email/mock",
+  "migration",
+  "sea-orm/mock",
+  "settings/mock",
+]
+
+[dependencies]
+actix-web = { workspace = true }
+sea-orm = { workspace = true, features = [
+  "sqlx-postgres",
+  "sqlx-sqlite",
+  "runtime-actix-rustls",
+  "macros",
+] }
+log = { workspace = true }
+env_logger = { workspace = true }
+url = { workspace = true }
+entity = { path = "../entity" }
+
+config = { path = "../config" }
+email = { path = "../email" }
+error = { path = "../error" }
+settings = { path = "../settings" }
+migration = { path = "../migration", optional = true }

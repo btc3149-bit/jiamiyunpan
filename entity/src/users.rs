@@ -1,0 +1,111 @@
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize, Serializer};
+
+fn option_into_bool<S>(x: &Option<String>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_bool(x.is_some())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, DeriveEntityModel, Eq)]
+#[sea_orm(table_name = "users")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    pub role: Option<String>,
+    pub quota: Option<i64>,
+    pub email: String,
+    #[serde(skip_serializing)]
+    pub password: Option<String>,
+    #[serde(skip_deserializing, serialize_with = "option_into_bool")]
+    pub secret: Option<String>,
+    pub pubkey: String,
+    pub fingerprint: String,
+    pub key_type: String,
+    pub wrapping_pubkey: Option<String>,
+    pub security_version: i32,
+    #[serde(skip_serializing)]
+    pub opaque_password_file: Option<String>,
+    pub encrypted_private_key: Option<String>,
+    pub email_verified_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub share_notifications_enabled: bool,
+    pub locale: Option<String>,
+}
+
+impl Model {
+    pub fn verify_tfa(&self, token: Option<String>) -> bool {
+        match self.secret.as_deref() {
+            Some(secret) => util::validation::validate_otp(secret, token.as_ref()),
+            None => true,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {
+    #[sea_orm(has_many = "super::sessions::Entity")]
+    Sessions,
+    #[sea_orm(has_many = "super::links::Entity")]
+    Links,
+}
+
+impl Related<super::sessions::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Sessions.def()
+    }
+}
+
+impl Related<super::links::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Links.def()
+    }
+}
+
+impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn test_serialize_secret_into_bool() {
+        let user = super::Model {
+            id: crate::Uuid::new_v4(),
+            role: None,
+            quota: None,
+            email: "test@test.com".to_string(),
+            password: None,
+            secret: None,
+            pubkey: "pubkey".to_string(),
+            fingerprint: "fingerprint".to_string(),
+            key_type: "rsa".to_string(),
+            wrapping_pubkey: None,
+            security_version: 0,
+            opaque_password_file: None,
+            encrypted_private_key: None,
+            email_verified_at: None,
+            created_at: 0,
+            updated_at: 0,
+            share_notifications_enabled: true,
+            locale: None,
+        };
+
+        let mut user2 = user.clone();
+        user2.secret = Some("secret".to_string());
+
+        let value = serde_json::to_value(&user).unwrap();
+
+        assert_eq!(
+            value.get("secret").unwrap().clone(),
+            serde_json::Value::Bool(false)
+        );
+
+        let value = serde_json::to_value(&user2).unwrap();
+
+        assert_eq!(
+            value.get("secret").unwrap().clone(),
+            serde_json::Value::Bool(true)
+        );
+    }
+}

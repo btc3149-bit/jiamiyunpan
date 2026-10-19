@@ -1,0 +1,159 @@
+use std::str::FromStr;
+
+use actix_web::http::header::ContentEncoding;
+use actix_web::{route, web, HttpRequest, HttpResponse};
+use auth::data::transfer_claims::StorageClaims;
+use context::Context;
+use entity::Uuid;
+use error::{AppResult, Error};
+use fs::prelude::*;
+
+use crate::{permission::require_read, repository::cached::get_file};
+
+/// Get file content by its id
+///
+/// Request:
+///  - Query: chunk: i32 - if omitted, file will be streamed until its completely downloaded
+///
+/// Response: [actix_web::web::Bytes]
+///  - Content-Type: application/octet-stream
+#[route("/api/storage/{file_id}", method = "GET")]
+pub(crate) async fn download(
+    req: HttpRequest,
+    claims: StorageClaims,
+    context: web::Data<Context>,
+) -> AppResult<HttpResponse> {
+    let context = context.into_inner();
+    let file_id: String = util::actix::path_var(&req, "file_id")?;
+    let file_id = Uuid::from_str(&file_id)?;
+    claims.validate_transfer_path(file_id, "download")?;
+    let chunk = util::actix::query_var::<i64>(&req, "chunk").ok();
+    let format = util::actix::query_var::<String>(&req, "format").ok();
+
+    // Authorize against the database, not the metadata cache. The cache is
+    // keyed per caller so it already refuses another user's file, but an
+    // explicit read gate keeps authorization from ever riding on that keying.
+    require_read(&context.db, file_id, claims.sub()).await?;
+
+    let file = get_file(&context, claims.sub(), file_id)
+        .await
+        .ok_or_else(|| Error::NotFound("file_not_found".to_string()))?;
+
+    let storage = Fs::new(&context.config);
+
+    // Editable files go through the versioned layout so in-flight edits
+    // (chunks living under v{pending_version}/) stay invisible to readers
+    // until finalize flips the active-version pointer. Non-editable files
+    // are write-once — their chunks are in the legacy flat layout and the
+    // versioned path would add nothing.
+    let versioned = file.use_versioned_layout();
+
+    if format.as_deref() == Some("tar") {
+        super::reject_tar_when_disabled(&context)?;
+
+        let (content_length, streamer) = if versioned {
+            (
+                storage.tar_content_length_v(&file, file.active_version).await?,
+                storage.stream_tar_v(&file, file.active_version).await?,
+            )
+        } else {
+            (
+                storage.tar_content_length(&file).await?,
+                storage.stream_tar(&file).await?,
+            )
+        };
+        let filename = format!("{}.tar", file_id);
+
+        return Ok(HttpResponse::Ok()
+            .insert_header(ContentEncoding::Identity)
+            .insert_header(("Content-Type", "application/x-tar"))
+            .insert_header(("Content-Length", content_length.to_string()))
+            .insert_header((
+                "Content-Disposition",
+                format!("attachment; filename=\"{filename}\""),
+            ))
+            .streaming(streamer.stream()));
+    }
+
+    let streamer = if versioned {
+        storage.stream_v(&file, file.active_version, chunk).await?
+    } else {
+        storage.stream(&file, chunk).await?
+    };
+
+    let filename = match chunk {
+        Some(chunk) => file.filename()?.with_chunk(chunk).with_extension(".enc"),
+        None => file.filename()?.with_extension(".enc"),
+    };
+
+    Ok(HttpResponse::Ok()
+        .insert_header(ContentEncoding::Identity)
+        .insert_header(("Content-Type", "application/octet-stream"))
+        .insert_header((
+            "Content-Disposition",
+            format!("attachment; filename=\"{filename}\""),
+        ))
+        .streaming(streamer.stream()))
+}
+
+/// Get head response for a file this will give all the header
+/// information, but no file content.
+#[route("/api/storage/{file_id}", method = "HEAD")]
+pub(crate) async fn head(
+    req: HttpRequest,
+    context: web::Data<Context>,
+    claims: StorageClaims,
+) -> AppResult<HttpResponse> {
+    let context = context.into_inner();
+    let file_id: String = util::actix::path_var(&req, "file_id")?;
+    let file_id = Uuid::from_str(&file_id)?;
+    claims.validate_transfer_path(file_id, "download")?;
+    let chunk = util::actix::query_var::<i64>(&req, "chunk").ok();
+    let format = util::actix::query_var::<String>(&req, "format").ok();
+
+    require_read(&context.db, file_id, claims.sub()).await?;
+
+    let file = get_file(&context, claims.sub(), file_id)
+        .await
+        .ok_or_else(|| Error::NotFound("file_not_found".to_string()))?;
+
+    if format.as_deref() == Some("tar") {
+        super::reject_tar_when_disabled(&context)?;
+
+        let filename = format!("{}", file_id);
+        return Ok(HttpResponse::Ok()
+            .insert_header(("Content-Type", "application/x-tar"))
+            .insert_header((
+                "Content-Disposition",
+                format!("attachment; filename=\"{filename}.tar\""),
+            ))
+            .finish());
+    }
+
+    // Repeat the existence check GET does: a 200 here would advertise a
+    // chunk that the GET on the same URL refuses with 404.
+    if let Some(chunk) = chunk {
+        let storage = Fs::new(&context.config);
+        let exists = if file.use_versioned_layout() {
+            storage.exists_v(&file, file.active_version, chunk).await?
+        } else {
+            storage.exists(&file, chunk).await?
+        };
+        if !exists {
+            return Err(Error::NotFound("chunk_not_found".to_string()));
+        }
+    }
+
+    let filename = match chunk {
+        Some(chunk) => file.filename()?.with_chunk(chunk).with_extension(".enc"),
+        None => file.filename()?.with_extension(".enc"),
+    };
+
+    Ok(HttpResponse::Ok()
+        .insert_header(("Content-Type", "application/octet-stream"))
+        .insert_header((
+            "Content-Disposition",
+            format!("attachment; filename=\"{filename}\""),
+        ))
+        .finish())
+}

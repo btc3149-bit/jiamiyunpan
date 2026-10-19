@@ -1,0 +1,34 @@
+export interface Data {
+  users: Users
+  sharing: Sharing
+  /**
+   * Read-only deployment flag surfaced on the settings GET (not persisted).
+   * When true the admin "send test email" card is hidden and its endpoint 403s.
+   */
+  mailer_disable_test?: boolean
+}
+
+export interface Users {
+  quota_bytes?: number
+  allow_register: boolean
+  enforce_email_activation: boolean
+  email_whitelist: WhitelistOrBlacklist
+  email_blacklist: WhitelistOrBlacklist
+}
+
+/**
+ * Admin kill switch for account-to-account sharing.
+ * Flipping to `false` makes every `/api/shares/...` endpoint return
+ * `503 sharing_disabled` and tells `/api/capabilities` to advertise
+ * `sharing.enabled = false` so clients hide the UI fail-closed.
+ * Existing share rows are preserved across toggles.
+ */
+export interface Sharing {
+  enabled: boolean
+  /** Cipher new uploads are encrypted with, advertised to clients via `/api/capabilities`. */
+  default_cipher: string
+}
+
+export interface WhitelistOrBlacklist {
+  rules: string[]
+}
