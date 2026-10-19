@@ -130,7 +130,7 @@ describe('Cipher metadata nonce test', () => {
   // nonce-prepend format drifts, one of the three fails.
   it('UNIT: CIPHER: cross-client golden vector decrypts', async () => {
     const key = crypto.uint8.fromHex('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f')
-    const blob = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeafbbe8a3087cc12efc536324b18fb194d014ab82478e8e43951d2d'
+    const blob = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeafb9eead017cd375e65b76477da11ef42cce212c8493d56d359dd37a03279997'
 
     expect(await crypto.cipher.decryptString('ascon128a', blob, key)).toBe('jiamiyunpan.txt')
   })

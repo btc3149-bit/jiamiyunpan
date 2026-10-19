@@ -175,9 +175,10 @@ describe('share crypto helpers', () => {
 
     const wasm = await import('../../services/cryptfns/wasm')
     const der = cryptfns.uint8.fromBase64(payloadDer)
-    const signingInput = new Uint8Array(16 + der.length)
-    signingInput.set(new TextEncoder().encode('jiamiyunpan-share-v1\0'), 0)
-    signingInput.set(der, 16)
+    const prefix = new TextEncoder().encode('jiamiyunpan-share-v1\0')
+    const signingInput = new Uint8Array(prefix.length + der.length)
+    signingInput.set(prefix, 0)
+    signingInput.set(der, prefix.length)
 
     expect(wasm.rsa_verify_bytes(signingInput, signature, kp.publicKey as string)).toBe(true)
   })
@@ -206,9 +207,9 @@ describe('share crypto helpers', () => {
     const der = cryptfns.uint8.fromBase64(payloadDer)
     der[20] ^= 0xff
     const wasm = await import('../../services/cryptfns/wasm')
-    const tampered = new Uint8Array(16 + der.length)
+    const tampered = new Uint8Array(21 + der.length)
     tampered.set(new TextEncoder().encode('jiamiyunpan-share-v1\0'), 0)
-    tampered.set(der, 16)
+    tampered.set(der, 21)
     expect(wasm.rsa_verify_bytes(tampered, signature, kp.publicKey as string)).toBe(false)
   })
 
