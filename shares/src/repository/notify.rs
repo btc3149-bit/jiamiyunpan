@@ -23,7 +23,7 @@ struct Copy {
 fn copy(locale: &str) -> Copy {
     match locale {
         "fr" => Copy {
-            subject: "Un nouveau fichier a été partagé avec vous sur 甲米云盘",
+            subject: "Un nouveau fichier a été partagé avec vous sur Jiami Drive",
             pre_header: "Connectez-vous pour voir ce qui a été partagé avec vous.",
             content: r#"
 <h1>Un nouveau fichier a été partagé avec vous sur 甲米云盘</h1>
@@ -45,7 +45,7 @@ fn copy(locale: &str) -> Copy {
 "#,
         },
         "de" => Copy {
-            subject: "Eine neue Datei wurde auf 甲米云盘 mit Ihnen geteilt",
+            subject: "Eine neue Datei wurde auf Jiami Drive mit Ihnen geteilt",
             pre_header: "Melden Sie sich an, um zu sehen, was mit Ihnen geteilt wurde.",
             content: r#"
 <h1>Eine neue Datei wurde auf 甲米云盘 mit Ihnen geteilt</h1>
@@ -67,7 +67,7 @@ fn copy(locale: &str) -> Copy {
 "#,
         },
         "hr" => Copy {
-            subject: "Nova datoteka je podijeljena s vama na 甲米云盘u",
+            subject: "Nova datoteka je podijeljena s vama na Jiami Driveu",
             pre_header: "Prijavite se da vidite što je podijeljeno s vama.",
             content: r#"
 <h1>Nova datoteka je podijeljena s vama na 甲米云盘u</h1>
@@ -88,7 +88,7 @@ fn copy(locale: &str) -> Copy {
 "#,
         },
         _ => Copy {
-            subject: "You have a new shared file on 甲米云盘",
+            subject: "You have a new shared file on Jiami Drive",
             pre_header: "Sign in to view what was shared with you.",
             content: r#"
 <h1>You have a new shared file on 甲米云盘</h1>

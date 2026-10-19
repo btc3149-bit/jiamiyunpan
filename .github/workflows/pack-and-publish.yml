@@ -311,8 +311,8 @@ jobs:
       - name: Do a cargo check to force integration of frontend assets
         run: cargo check -p jiamiyunpan
 
-      - name: Verify the jiamiyunpan/src/client.rs
-        run: cat jiamiyunpan/src/client.rs
+      - name: Verify the server/src/client.rs
+        run: cat server/src/client.rs
 
       - name: Cross compile
         run: cross build --bin ${{ env.handle }} --release --target ${{ matrix.target }} -v

@@ -15,7 +15,7 @@ use jiamiyunpan::server;
 
 use crate::shares_common::*;
 
-const SUBJECT: &str = "You have a new shared file on 甲米云盘";
+const SUBJECT: &str = "You have a new shared file on Jiami Drive";
 
 #[actix_web::test]
 async fn test_share_dispatches_notification_email_to_recipient() {

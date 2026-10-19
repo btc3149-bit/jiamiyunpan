@@ -264,10 +264,20 @@ jobs:
       S3_PATH_STYLE: "true"
     steps:
       - uses: actions/checkout@v4
+      - name: Skip when R2 credentials are not configured
+        id: guard
+        run: |
+          if [ -z "$S3_ENDPOINT" ]; then
+            echo "R2_TEST_* secrets are not configured on this repository — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.skip != 'true'
       - uses: awalsh128/cache-apt-pkgs-action@latest
+        if: steps.guard.outputs.skip != 'true'
         with:
           packages: curl libpq-dev clang llvm pkg-config nettle-dev libc6-dev
           version: 1.0
       - name: Run S3 versioned integration tests against R2
+        if: steps.guard.outputs.skip != 'true'
         run: cargo test -p fs --features s3-integration-tests providers::s3::s3_versioned_tests -- --nocapture
