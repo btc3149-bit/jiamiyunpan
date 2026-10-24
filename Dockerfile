@@ -6,7 +6,9 @@ FROM alpine:3.18
 ARG BIN_DIR
 
 # Install required runtime dependencies using apk
-RUN apk add --no-cache bash libgcc openssl tini tzdata
+# The binary is a statically linked musl build on rustls/ring, so it needs
+# no OpenSSL runtime library.
+RUN apk add --no-cache bash libgcc tini tzdata
 
 COPY $BIN_DIR/jiamiyunpan /usr/local/bin
 
