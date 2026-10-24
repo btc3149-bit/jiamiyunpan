@@ -51,7 +51,7 @@ argon2 = "^0.5"
 # dragging `rand ^0.10` into the wasm graph, and `mlkem768` is the only set we
 # instantiate. The app FFI additionally disables the unverified NEON path via
 # LIBCRUX_DISABLE_SIMD128 (see jiamiyunpan-app/rust/.cargo/config.toml).
-libcrux-ml-kem = { version = "=0.0.9", default-features = false, features = ["mlkem768"] }
+libcrux-ml-kem = { version = "=0.0.10", default-features = false, features = ["mlkem768"] }
 # libcrux does not zeroize its key or shared-secret types; we hold the decaps
 # key and every shared secret in Zeroizing ourselves.
 zeroize = { version = "^1", features = ["alloc"] }

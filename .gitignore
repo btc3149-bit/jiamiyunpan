@@ -19,3 +19,6 @@ web/test-results/
 # nix build output symlinks
 result
 result-*
+
+# local-only build workaround, never commit
+/_local_patches

@@ -52,9 +52,9 @@ sea-orm = { version = "^1.1", features = ["sqlx-postgres", "sqlx-sqlite", "runti
 sea-orm-migration = { version = "^1.1", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-actix-rustls"] }
 
 # Crypto & security
-rustls = "^0.20"
-rustls-pemfile = "^1"
-rcgen = "^0.10"
+rustls = "^0.23"
+rustls-pemfile = "^2"
+rcgen = "^0.13"
 rsa = { version = "^0.8", features = ["sha2"] }
 der = { version = "^0.6", features = ["derive", "oid", "alloc"] }
 base64 = "^0.21"
@@ -62,10 +62,10 @@ hex = "^0.4"
 jsonwebtoken = { version = "^10", features = ["rust_crypto"] }
 
 # HTTP client
-reqwest = "^0.11"
+reqwest = "^0.12"
 
 # Object storage
-s3 = { package = "rust-s3", version = "^0.35", default-features = false, features = ["tokio-rustls-tls"] }
+s3 = { package = "rust-s3", version = "^0.36", default-features = false, features = ["tokio-rustls-tls"] }
 
 # Utilities
 uuid = { version = "1.2.2", features = ["serde", "v4", "v7"] }
@@ -91,7 +91,6 @@ zxcvbn = "2.2.1"
 google-authenticator = "0.3.0"
 bcrypt = "^0.14"
 qstring = "^0.7"
-openssl = { version = "0.10", features = ["vendored"] }
 
 [workspace.lints.rust.unexpected_cfgs]
 # Allow wasm-bindgen internal cfg flags used by macros

@@ -17,7 +17,6 @@ import SearchButton from '@/components/files/search/SearchButton.vue'
 import SearchModal from '@/components/files/search/SearchModal.vue'
 import ResendActivationNotification from './components/ResendActivationNotification.vue'
 import MigrationNoticeModal from '@/components/modals/MigrationNoticeModal.vue'
-import ConnectAppModal from '@/components/modals/ConnectAppModal.vue'
 import ReindexModal from '@/components/modals/ReindexModal.vue'
 import { useAuthedShareBootstrap } from '@/composables/useAuthedShareBootstrap'
 
@@ -97,7 +96,6 @@ const menuClick = (event: Event, item: NavBarItem) => {
            clickable while it waits. -->
       <ReindexModal />
       <MigrationNoticeModal />
-      <ConnectAppModal />
 
       <slot :authenticated="login.authenticated" :keypair="crypto.keypair" />
 

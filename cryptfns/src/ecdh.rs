@@ -510,16 +510,6 @@ mod tests {
         // another. What is asserted here is the structure plus a live
         // round-trip: version byte, exact length, recovery, wrong key rejected.
         //
-        // A pinned cross-build vector (native vs. WASM portable path, NEON vs.
-        // SIMD-off) used to live here. It was produced under the previous
-        // domain-separation string, so it cannot survive a rename: WRAP_INFO is
-        // part of the HKDF input, and the stored blob would no longer unwrap.
-        //
-        // TODO(rebrand): regenerate it once a machine with a C toolchain is
-        // available. Add a temporary test that prints `wrap(b"golden-file-key-
-        // 0123456789abcdef", &public)` for a fixed keypair, run it natively and
-        // then with LIBCRUX_DISABLE_SIMD128=1, and only pin the value if both
-        // builds agree.
         let (private, public) = keypair();
         let file_key = b"golden-file-key-0123456789abcdef";
         let blob = wrap(file_key, &public).unwrap();
@@ -534,4 +524,78 @@ mod tests {
         assert_eq!(unwrap(&blob, &private).unwrap(), file_key);
         assert!(unwrap(&blob, &keypair().0).is_err());
     }
+
+    /// A blob produced by the native build (MSVC, libcrux SIMD paths), pinned
+    /// so builds with different codegen must still recover the file key. The
+    /// pinned value was verified to unwrap under the WASM portable build of
+    /// the same source (wasm32-unknown-unknown, SIMD off) before being
+    /// committed, so it is a true cross-build anchor: native wraps, WASM
+    /// unwraps, and any drift in the HKDF domain separation or the chunked
+    /// AEAD layout breaks one of the two sides.
+    #[test]
+    fn cross_build_golden_vector() {
+        let recovered = unwrap(GOLDEN_BLOB, GOLDEN_PRIVATE).unwrap();
+        assert_eq!(recovered, b"golden-file-key-0123456789abcdef");
+    }
+
+    /// Native-produced wrap of `b"golden-file-key-0123456789abcdef"` under the
+    /// current WRAP_INFO, pinned after the WASM portable build reproduced the
+    /// recovery on the same source.
+    const GOLDEN_BLOB: &str = "AgetxE3P4TFd3BqRGMBkU01MTWaYdA1NDRlxM/Ecp2BkSgxy/aRaQpc1jxAqtLDAqUjM/biWks5hQ6SQKhv96bXqoIOkv8muJBfjQ3Z1PFYH9jmYKW92WVNPjbkZlGUl2ae8OLU2OwB0TDw9VsqMYhxK02B6RU2wCtc5so+3Wz7CyvF15jBD7qKcXkC1YjGH2EqeqLth9XecTQbOealRCJ3bpVYgBtwtDbbg0xwg29ipxslnfCzaAUz1ehdBmU8uWa3pxK1EGbEpIurC8wTzbRSUrWb06iF2WJWO2ZTW1tNiYdu0TJ+QGtDpY4Yrn7WuBHakUm1LKECarGg0jKbiVEd9zuGmf3aTDr/pRngDZddXu0KppQdrqV8E0FDhvSR/6lxTPFB25A89KqN1PBFCNxwNX+mjA4kDhLSFKKdx94UDxidcrgCq68v11q4PqH7rgzGz8lqV87ZrMCRMBkIvE6QEhfbztH8vSCNwIjh2HDjTirY3kLwmULFknbnWOB9Ua2zDEDY5x40F59XbwV0CZu0562nLWEkbbbQRoACu/fseDvwlAxigSta6jk+jYPPOGpNvTCemgwhJl8/LEDSBx2dkdiiA8yb4SHVOqLyuiuFq+pNN1B1LGcpnopZRVO0SRaQTk59HRu/zSj+GEJGZrkcroSrjVMIUbmMCWwBOkzQ+oXzqAmkg4j0/nxdX6sb0gGllle5CAQt7YumZiO1IS0XWYL0xzNr85N89gZ6fLiBnApX7tyS/QyiqYL8fbavYdZzVy6N2ZEb2y7VigOYJAnXK75bBZSZ3BHlQqrX9ddnXzRA+0ab8SzpuZ+aEMv3TfhUaA76lfbyDTfl7ekCRxrOWX5oY8x74d3u17zoTfXu/dEYayOd+rsfy8iwDnrzmwmCiOgon+sX5TKUXd8rjmz7UaeHeWoOWlftlP3KzIgdE9xd6j6nD31XDZyWEgg31s9RRptuMmY5yz8XNsuAboAvn/vbDK2nM0RXMqUtF/8QeAWYgiDFTA39XIReNDhl6UJTgOvP+TwZP+cdTpWTqoMhvdqA0jzKnfSwaAtxCpP6XYFcdS1g8FDRVs/izsx3qAXv5tiyKn8TYQRNQa69V0TtslJgYp42ipaXLxvGljOqfm62wS19uo1gNlFm3vz9HhIk3KWNeoPp/DvHZltYBSl3OzhokKmVv0J13VxCt78ofmnxJN1RrmEEImy+fPF3/9M+/Pe/gzNy0f6+dZJPm4Pe5XGwFae0Z+80FzC5q7JOVktVnfzQCHxUMqTrG4bgX/Zz77W8FIrRm1TYm7WGBtzRVqx40dmLFiNd8lBWaRkGnZVwCPrZu/m3TAbJIfkTVXtOFKYt+WT77gOjIfkA3CEVy1Ko3ylOIpCJjArW0XolR2ZqAlmy9HCBdmcIJ7caIYFROnGgHxd0f5Vaj2b5Ygq/QgVQEHt+92yyKN83+sj1n4xnJKm856uVFZPyLj2vH842AV2xTyVIr+DNVDE3342ZtwPK0UOb/Cmsh8f76a9E9X1euDnImO5SwYPElBCvMnfpBFgOlmqFvRDWluMgSOeCyC80kefr/chXyl66u9OJFF4JO/Eyjl3o5dGcN023hnw==";
+
+    const GOLDEN_PRIVATE: &str = concat!(
+        "-----BEGIN JIAM WRAPPING PRIVATE KEY-----\n",
+        "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\n",
+        "-----END JIAM WRAPPING PRIVATE KEY-----\n"
+    );
 }

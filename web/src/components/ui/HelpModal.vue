@@ -33,8 +33,7 @@ const editorShortcuts = computed(() => [
 // Anyone reading this is already on a running server — either their own or one
 // they pay for — so a self-hosting guide has no audience here.
 const links = [
-  { href: 'https://github.com/jiamiyunpan/jiamiyunpan', label: 'help.links.source' },
-  { href: 'https://jiamiyunpan.com/apps?utm_source=jiamiyunpan-server', label: 'help.links.apps' }
+  { href: 'https://github.com/btc3149-bit/jiamiyunpan', label: 'help.links.source' }
 ]
 </script>
 
