@@ -751,31 +751,30 @@ jobs:
       - name: Prepare the version prefix
         id: prepare
         run: |
-          TAGS=""
-
+          # Publish to GHCR: zero extra secrets (uses the built-in token).
+          # The original Docker Hub flow required DOCKER_USERNAME /
+          # DOCKER_PASSWORD secrets that no longer exist on this repo.
+          REGISTRY="ghcr.io/${{ github.repository_owner }}"
           VERSION="v${{ needs.meta.outputs.version }}-${{ matrix.shortname }}"
 
-          TAGS="${{ secrets.DOCKER_USERNAME }}/${{ env.docker_repo }}:$VERSION"
-          # TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/${{ env.docker_repo }}:$VERSION"
+          TAGS="${REGISTRY}/${{ env.docker_repo }}:$VERSION"
 
           UNSTABLE="unstable-${{ matrix.shortname }}"
-          TAGS="$TAGS,${{ secrets.DOCKER_USERNAME }}/${{ env.docker_repo }}:$UNSTABLE"
-          # TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/${{ env.docker_repo }}:$UNSTABLE"
+          TAGS="$TAGS,${REGISTRY}/${{ env.docker_repo }}:$UNSTABLE"
 
           if [[ "${{ needs.meta.outputs.rc }}" == "false" ]]; then
             LATEST="latest-${{ matrix.shortname }}"
-            TAGS="$TAGS,${{ secrets.DOCKER_USERNAME }}/${{ env.docker_repo }}:$LATEST"
-            # TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/${{ env.docker_repo }}:$LATEST"
+            TAGS="$TAGS,${REGISTRY}/${{ env.docker_repo }}:$LATEST"
           fi
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
-          echo "image_name=${{ secrets.DOCKER_USERNAME }}/${{ env.docker_repo }}:$VERSION" >> $GITHUB_OUTPUT
+          echo "image_name=${REGISTRY}/${{ env.docker_repo }}:$VERSION" >> $GITHUB_OUTPUT
 
       # Build a single architecture specific Docker image with an explicit architecture extension in the Docker
-      # tag value. We have to push it to Docker Hub otherwise we can't make the multi-arch manifest below. If the
+      # tag value. We have to push it to GHCR otherwise we can't make the multi-arch manifest below. If the
       # image fails testing (or doesn't work but wasn't caught because it is non-x86-64 which we can't at the moment
-      # test here) it will have been pushed to Docker Hub but is NOT the image we expect people to use, that is the
+      # test here) it will have been pushed to GHCR but is NOT the image we expect people to use, that is the
       # combined multi-arch image that lacks the architecture specific tag value extension and that will ONLY be
       # pushed if all architecture specific images build and (where supported) passt he sanity check below.
       - name: Build Docker image ${{ steps.prepare.outputs.image_name }}
@@ -801,11 +800,12 @@ jobs:
         run: |
           docker run --rm ${{ steps.prepare.outputs.image_name }} /usr/local/bin/jiamiyunpan --version
 
-      - name: Log into Docker Hub
+      - name: Log into GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       # Upload the Docker image as a GitHub Actions artifact, handy when not publishing or investigating a problem
       - name: Upload built image to GitHub Actions
@@ -814,7 +814,7 @@ jobs:
           name: tmp-docker-image-${{ matrix.shortname }}
           path: /tmp/docker-${{ matrix.shortname }}-img.tar
 
-      - name: Publish image to Docker Hub
+      - name: Publish image to GHCR
         id: publish
         uses: docker/build-push-action@v5
         with:
@@ -840,17 +840,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log into Docker Hub
+      - name: Log into GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Apply rules to Git metadata to generate potential Docker tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.docker_repo }}
+          images: ghcr.io/${{ github.repository_owner }}/${{ env.docker_repo }}
           flavor: |
             latest=false
           tags: |
@@ -861,13 +862,13 @@ jobs:
 
       - name: Create multi-arch manifest(s)
         run: |
-          LOWER_DOCKER_ORG="${{ secrets.DOCKER_USERNAME }}"
-
           ARCH_SHORT_NAMES="amd64 armv6 armv7 arm64"
           REFERENCED_IMAGES=""
 
           # Convert the line-break separated tag pairs into space separated tag pairs without a trailing line break.
           # This can then easily be used with a shell for loop in the steps below.
+          # Each pair is fully qualified (ghcr.io/owner/repo:tag) thanks to the
+          # `images:` value above, so no extra registry prefix is needed here.
           REPO_AND_TAG_PAIRS=$(echo "${{ steps.meta.outputs.tags }}" | tr "\n" " " | tr -d "\n")
 
           # Imagine that we are invoked with two tags: v1.0.1 and latest
@@ -876,39 +877,21 @@ jobs:
           for REPO_AND_TAG in $REPO_AND_TAG_PAIRS; do
             if [[ "${REFERENCED_IMAGES}" == "" ]]; then
               for ARCH_SHORT_NAME in ${ARCH_SHORT_NAMES}; do
-                REFERENCED_IMAGES="${REFERENCED_IMAGES} ${LOWER_DOCKER_ORG}/${REPO_AND_TAG}-${ARCH_SHORT_NAME} "
+                REFERENCED_IMAGES="${REFERENCED_IMAGES} ${REPO_AND_TAG}-${ARCH_SHORT_NAME} "
               done
             fi
 
             echo "REFERENCED_IMAGES"
-            docker manifest create --amend ${LOWER_DOCKER_ORG}/${REPO_AND_TAG} ${REFERENCED_IMAGES}
+            docker manifest create --amend ${REPO_AND_TAG} ${REFERENCED_IMAGES}
           done
 
-      - name: Publish multi-arch image manifest(s) to Docker Hub
+      - name: Publish multi-arch image manifest(s) to GHCR
         id: publish
         run: |
-          LOWER_DOCKER_ORG="${{ secrets.DOCKER_USERNAME }}"
-
           # Convert the line-break separated tag pairs into space separated tag pairs without a trailing line break.
           # This can then easily be used with a shell for loop in the steps below.
           REPO_AND_TAG_PAIRS=$(echo "${{ steps.meta.outputs.tags }}" | tr "\n" " " | tr -d "\n")
 
           for REPO_AND_TAG in $REPO_AND_TAG_PAIRS; do
-            docker manifest push ${LOWER_DOCKER_ORG}/${REPO_AND_TAG}
+            docker manifest push ${REPO_AND_TAG}
           done
-
-      - name: Prepare README for Docker Hub
-        run: |
-          RAW_BASE="https://raw.githubusercontent.com/${{ github.repository }}/master/"
-          sed -e "s|src=\"\./|src=\"${RAW_BASE}|g" \
-              -e "s|href=\"\./|href=\"${RAW_BASE}|g" \
-              README.md > README.docker.md
-
-      - name: Update repo description
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-          repository: ${{ secrets.DOCKER_USERNAME }}/${{ env.docker_repo }}
-          short-description: ${{ github.event.repository.description }}
-          readme-filepath: ./README.docker.md
