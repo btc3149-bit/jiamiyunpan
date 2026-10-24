@@ -1,6 +1,6 @@
 //! Bulk `DeleteObjects` support for `S3Provider`.
 //!
-//! `rust-s3` 0.35 exposes no `DeleteObjects` command, but the pieces needed to
+//! `rust-s3` exposes no `DeleteObjects` command, but the pieces needed to
 //! hand-build one are public: the bucket URL, HTTP client, and AWS SigV4
 //! primitives. The S3 `POST ?delete` API is the right answer at the versioned
 //! scale we care about (a thirty-version note with thirty chunks per version
@@ -176,28 +176,36 @@ async fn delete_one_batch(bucket: &s3::Bucket, keys: &[String]) -> AppResult<()>
 
     headers.insert(AUTHORIZATION, hv(&authorization)?);
 
-    // Build the hyper request from the assembled headers + body.
-    let mut request = hyper::Request::builder()
-        .method(hyper::Method::POST)
-        .uri(url.as_str());
+    // Send via reqwest pinned to the rustls backend. The workspace pulls
+    // native-tls in through reqwest's default features, but a browser-grade
+    // probe (see `direct.rs`) and this call both want the rustls path, and
+    // musl/static builds have no interest in a host OpenSSL dependency.
+    // HOST and CONTENT_LENGTH are deliberately not attached: reqwest derives
+    // both from the URL and the body, and the derived values are exactly
+    // what was signed (host:port of `url`, byte length of `body`).
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .map_err(|e| Error::InternalError(format!("HTTP client build failed: {}", e)))?;
+    let mut request = client.post(url.as_str());
     for (name, value) in headers.iter() {
+        if name == http::header::HOST || name == http::header::CONTENT_LENGTH {
+            continue;
+        }
         request = request.header(name, value);
     }
-    let request = request
-        .body(hyper::Body::from(body))
-        .map_err(|e| Error::InternalError(format!("hyper request build: {}", e)))?;
-
-    let client = bucket.http_client();
-    let response = client
-        .request(request)
+    let response = request
+        .body(body)
+        .send()
         .await
         .map_err(|e| Error::StorageError(format!("S3 DeleteObjects request failed: {}", e)))?;
 
     let status = response.status();
-    let body_bytes = hyper::body::to_bytes(response.into_body())
+    let response_body = response
+        .bytes()
         .await
         .map_err(|e| Error::StorageError(format!("DeleteObjects body read failed: {}", e)))?;
-    let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+    let body_str = String::from_utf8_lossy(&response_body).into_owned();
 
     if !status.is_success() {
         return Err(Error::StorageError(format!(

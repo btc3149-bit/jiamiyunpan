@@ -52,7 +52,9 @@ sea-orm = { version = "^1.1", features = ["sqlx-postgres", "sqlx-sqlite", "runti
 sea-orm-migration = { version = "^1.1", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-actix-rustls"] }
 
 # Crypto & security
-rustls = "^0.23"
+# ring provider: aws-lc-rs (rustls 0.23 default) needs cmake/perl and is
+# unreliable on armv6/armv7 musl cross builds; ring cross-compiles cleanly.
+rustls = { version = "^0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "^2"
 rcgen = "^0.13"
 rsa = { version = "^0.8", features = ["sha2"] }
@@ -96,3 +98,4 @@ qstring = "^0.7"
 # Allow wasm-bindgen internal cfg flags used by macros
 level = "warn"
 check-cfg = ["cfg(wasm_bindgen_unstable_test_coverage)"]
+
