@@ -85,7 +85,7 @@ jobs:
           echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
 
       - name: Read the application version from Cargo.toml
-        run: echo "version=$(grep -m 1 '^version' "${{ env.handle }}/Cargo.toml" | sed -E 's/version = "(.*)"/\1/')" >> $GITHUB_OUTPUT
+        run: echo "version=$(grep -m 1 '^version' "server/Cargo.toml" | sed -E 's/version = "(.*)"/\1/')" >> $GITHUB_OUTPUT
         id: extract_version
 
       - name: Set the application version
