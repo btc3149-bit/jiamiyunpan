@@ -23,7 +23,7 @@ pub struct SslConfig {
 
     /// SSL_CERT_FILE: Location of the ssl cert file, this will be loaded and setup on to the server
     /// if you don't provide this, the server will generate a self signed certificate
-    /// and place them in the /tmp directory. This is not recommended for production.
+    /// and place them in the DATA_DIR directory. This is not recommended for production.
     ///
     /// *optional*
     ///
@@ -32,7 +32,7 @@ pub struct SslConfig {
 
     /// SSL_KEY_FILE: Location of the ssl key file, this will be loaded and setup on to the server
     /// if you don't provide this, the server will generate a self signed certificate
-    /// and place them in the /tmp directory. This is not recommended for production.
+    /// and place them in the DATA_DIR directory. This is not recommended for production.
     ///
     /// *optional*
     ///

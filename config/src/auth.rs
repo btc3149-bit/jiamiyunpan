@@ -92,6 +92,22 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub(crate) fn new(app: &AppConfig, vars: &mut Vars) -> Self {
+        // Detect whether JWT_SECRET was actually provided (env, dotenv or CLI
+        // arg) before var_default substitutes a random secret. Empty-string
+        // values count as unset, same as everywhere else in Vars.
+        let jwt_secret_provided = vars
+            .maybe_var::<String>("JWT_SECRET")
+            .maybe_get()
+            .is_some();
+
+        if !jwt_secret_provided {
+            vars.add_warning(
+                "未设置 JWT_SECRET，服务重启后所有会话将失效（已回退为每次启动随机生成）\
+                 — production deployments should set JWT_SECRET to a fixed random value"
+                    .to_string(),
+            );
+        }
+
         let jwt_secret = vars.var_default("JWT_SECRET", uuid::Uuid::new_v4().to_string());
         let session_cookie = vars.var_default("SESSION_COOKIE", "jiamiyunpan_session".to_string());
         let refresh_cookie = vars.var_default("REFRESH_COOKIE", "jiamiyunpan_refresh".to_string());
@@ -131,6 +147,13 @@ fn parse_cookie_same_site(vars: &mut Vars) -> String {
             if matches!(x.to_lowercase().as_str(), "strict" | "lax" | "none") {
                 x
             } else {
+                // Invalid values silently fell back to Lax before; surface
+                // that through the startup warnings instead of hiding it.
+                vars.add_warning(format!(
+                    "COOKIE_SAME_SITE: invalid value '{x}', falling back to 'Lax' \
+                     (valid values: Lax / Strict / None)"
+                ));
+
                 "lax".to_string()
             }
         }

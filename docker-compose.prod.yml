@@ -1,0 +1,54 @@
+# 生产部署 compose 文件。
+# 日常开发用的 docker-compose.yml（postgres / minio / e2e）保持不动；
+# 生产用本文件：docker compose -f docker-compose.prod.yml up -d
+#
+# 必填环境变量（建议放同目录 .env 文件，compose 会自动读取）：
+#   APP_URL      对外访问地址，如 https://drive.example.com
+#   JWT_SECRET   固定随机串（openssl rand -hex 32）；不设则每次重启随机生成，所有会话失效
+#
+# 镜像是多架构 manifest（amd64 / armv6 / armv7 / arm64），按宿主机自动选择。
+
+services:
+  app:
+    image: ghcr.io/btc3149-bit/jiamiyunpan:unstable-amd64
+    container_name: jiamiyunpan
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/data
+      - APP_URL=${APP_URL:?APP_URL is required, e.g. https://drive.example.com}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required, generate with openssl rand -hex 32}
+      # 可选：切 PostgreSQL（默认 SQLite）。DATABASE_URL 与下方 postgres
+      # 服务配合使用，取消注释两处即可。
+      # - DATABASE_URL=postgres://jiamiyunpan:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/jiamiyunpan
+      # HTTP_ADDRESS 默认 localhost，容器内必须绑 0.0.0.0（镜像已通过 CMD 设置）
+    ports:
+      - "5443:5443"
+    volumes:
+      # 数据目录：sqlite.db、块文件、自签证书都在里面。备份见 docs/BACKUP.md
+      - ./data:/data
+    healthcheck:
+      # 自签证书默认开启，必须 --no-check-certificate / -k
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://localhost:5443/api/readiness || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # 可选：PostgreSQL。启用方法：
+  #   1. 取消本服务与上方 DATABASE_URL 的注释，并设置 POSTGRES_PASSWORD
+  #   2. 注意 SQLite 与 PostgreSQL 数据不通用，写入后不能来回切
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: jiamiyunpan-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: jiamiyunpan
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+  #     POSTGRES_DB: jiamiyunpan
+  #   volumes:
+  #     - ./pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U jiamiyunpan"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5

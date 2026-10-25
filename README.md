@@ -88,10 +88,12 @@ docker run --name jiamiyunpan -d \
   -e APP_URL='https://drive.example.com' \
   -v "$(pwd)/data:/data" \
   -p 5443:5443 \
-  jiamiyunpan/jiamiyunpan:latest
+  ghcr.io/btc3149-bit/jiamiyunpan:unstable-amd64
 ```
 
-> 镜像名 `jiamiyunpan/jiamiyunpan` 是占位符，构建并推送到你自己的 registry 后改成实际地址。
+镜像发布在 GHCR：`ghcr.io/btc3149-bit/jiamiyunpan`。`unstable-amd64` 标签是
+多架构 manifest，覆盖 `amd64` / `armv6` / `armv7` / `arm64` 四种架构，
+Docker 会按宿主机架构自动拉取对应镜像。
 
 首次启动会在 `DATA_DIR` 自动生成自签证书。生产环境请挂载自己的证书，或放在 Nginx / Caddy
 反代后面。
@@ -113,10 +115,30 @@ docker run --name jiamiyunpan -d \
   -e SMTP_DEFAULT_FROM_NAME='甲米云盘' \
   -v "$(pwd)/data:/data" \
   -p 5443:5443 \
-  jiamiyunpan/jiamiyunpan:latest
+  ghcr.io/btc3149-bit/jiamiyunpan:unstable-amd64
 ```
 
 `JWT_SECRET` 一定要设成固定随机串，否则容器重启后所有会话失效。
+
+### Docker Compose
+
+仓库提供 [docker-compose.prod.yml](./docker-compose.prod.yml) 用于生产部署
+（默认 SQLite，可选 Postgres 服务以注释形式给出）：
+
+```shell
+# 先编辑环境变量（APP_URL / JWT_SECRET 必填，建议用 .env 文件）
+curl -O https://raw.githubusercontent.com/btc3149-bit/jiamiyunpan/main/docker-compose.prod.yml
+
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml logs -f
+```
+
+容器内置 healthcheck（打 `https://localhost:5443/api/readiness`），用
+`docker ps` 或 `docker inspect --format '{{.State.Health.Status}}' jiamiyunpan`
+查看健康状态。
+
+**备份与恢复**见 [docs/BACKUP.md](./docs/BACKUP.md) —— 升级前请先备份
+`sqlite.db`：SeaORM migration 没有 downgrade，回滚旧版本前必须有 DB 备份。
 
 ## 配置
 

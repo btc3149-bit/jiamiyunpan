@@ -29,9 +29,9 @@ time = { version = "0.3", optional = true, features = ["formatting", "macros"] }
 url = { version = "^2", optional = true }
 # `rustls-tls` resolves to `rustls-tls-webpki-roots`, which is the point: the
 # probe in `direct.rs` stands in for a browser, and a browser has never heard
-# of an operator's internal CA. The workspace pulls reqwest's default
-# native-tls backend in as well and a crate cannot opt out of that from here,
-# so the probe picks its backend explicitly at the builder.
+# of an operator's internal CA. The workspace reqwest is pinned to rustls as
+# well, and the probe picks its backend explicitly at the builder so the
+# behaviour does not drift with dependency defaults.
 reqwest = { workspace = true, optional = true, features = ["rustls-tls"] }
 
 config = { path = "../config" }
