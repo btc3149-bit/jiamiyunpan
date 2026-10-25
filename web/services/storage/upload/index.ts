@@ -363,6 +363,48 @@ export const store = defineStore('upload', () => {
   }
 
   /**
+   * Move a failed upload back into the queue for another attempt.
+   *
+   * A plain failure keeps its server row and the record of chunks already
+   * stored, so the entry itself goes back to `waiting` and the transfer
+   * resumes from where it stopped. A fresh `temporaryId` keeps the retried
+   * transfer's reports from colliding with the stale row still listed in
+   * `done` or `failed`.
+   *
+   * A user-cancelled upload is different: `cancel` deleted the server row,
+   * so the same id can never resume — the transfer-token request would 404
+   * and the entry would bounce straight back to `failed`. When the unlocked
+   * keypair is available and the File object is still held, `push` rebuilds
+   * the transfer from scratch instead (resuming server-side if a row with
+   * the same name survived). Shared-folder entries are excluded from that
+   * rebuild: they were created through the multi-key fan-out, which a plain
+   * `push` would bypass, leaving the other members without a key wrap.
+   */
+  async function retry(file: UploadAppFile) {
+    failed.value = failed.value.filter((f) => f.id !== file.id)
+
+    const wasCancelled = cancelled.has(file.id)
+    cancelled.delete(file.id)
+
+    if (wasCancelled && file.file instanceof File && file.encrypted_key) {
+      const { store: cryptoStore } = await import('../../crypto')
+      const keypair = cryptoStore().keypair
+      if (keypair?.input) {
+        return push(keypair, file.file, file.file_id)
+      }
+    }
+
+    waiting.value.push({
+      ...file,
+      temporaryId: uuidv4(),
+      error: undefined,
+      cancel: false,
+      started_upload_at: undefined,
+      finished_upload_at: undefined
+    })
+  }
+
+  /**
    * Cancel the upload of a file
    */
   async function cancel(files: FilesStore, file: UploadAppFile) {
@@ -566,6 +608,7 @@ export const store = defineStore('upload', () => {
     pushIntoSharedFolder,
     create,
     createInSharedFolder,
+    retry,
     cancel,
     progress
   }

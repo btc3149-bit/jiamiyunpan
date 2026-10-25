@@ -8,6 +8,7 @@ import {
   mdiClose,
   mdiCheck,
   mdiCancel,
+  mdiRefresh,
   mdiTimerSandEmpty,
   mdiArrowUpBoldOutline,
   mdiArrowDownBoldOutline
@@ -20,7 +21,7 @@ const props = defineProps<{
   file: DownloadAppFile | UploadAppFile
 }>()
 
-const emits = defineEmits(['remove'])
+const emits = defineEmits(['remove', 'retry'])
 
 const { t } = useI18n()
 
@@ -172,6 +173,10 @@ const dismissLabel = computed(() =>
     ? t('files.transfers.cancelTransfer')
     : t('files.transfers.removeFromList')
 )
+
+// Only failed rows carry the retry control; like the dismiss button it has
+// no text, so the tooltip is its accessible name too.
+const retryLabel = computed(() => t('common.retry'))
 </script>
 
 <template>
@@ -187,6 +192,15 @@ const dismissLabel = computed(() =>
           @click="emits('remove', file, props.type)"
         >
           <BaseIcon :path="mdiClose" h="h-4" w="w-4" />
+        </button>
+        <button
+          v-if="props.type.endsWith('failed')"
+          class="min-h-[36px] min-w-[36px] flex items-center justify-center rounded hover:bg-paper-200 dark:hover:bg-brownish-700 transition-colors"
+          :title="retryLabel"
+          :aria-label="retryLabel"
+          @click="emits('retry', file, props.type)"
+        >
+          <BaseIcon :path="mdiRefresh" h="h-4" w="w-4" />
         </button>
         <BaseIcon
           :path="isUpload ? mdiArrowUpBoldOutline : mdiArrowDownBoldOutline"

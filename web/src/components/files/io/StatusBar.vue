@@ -164,6 +164,16 @@ const remove = (file: UploadAppFile, type: QueueItemActionType) => {
   }
 }
 
+const retry = (file: UploadAppFile | DownloadAppFile, type: QueueItemActionType) => {
+  if (type === 'upload:failed') {
+    return upload.retry(file as UploadAppFile)
+  }
+
+  if (type === 'download:failed') {
+    return download.retry(file as DownloadAppFile)
+  }
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && showTable.value) {
     showTable.value = false
@@ -227,7 +237,7 @@ window.addEventListener('keydown', (e) => {
       <!-- File list — viewport-capped height on mobile, fixed on larger screens -->
       <div class="max-h-[50vh] md:max-h-[325px] overflow-y-auto bg-paper-50 dark:bg-brownish-800">
         <template v-for="item in displaying" :key="`${item.file.id}-${item.type}`">
-          <SingleFile :file="item.file" :type="item.type" @remove="remove" />
+          <SingleFile :file="item.file" :type="item.type" @remove="remove" @retry="retry" />
         </template>
 
         <template v-if="!displaying.length">
