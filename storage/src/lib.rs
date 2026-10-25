@@ -1,6 +1,7 @@
 pub(crate) mod permission;
 pub(crate) mod repository;
 
+pub mod cleanup;
 pub mod data;
 pub mod routes;
 

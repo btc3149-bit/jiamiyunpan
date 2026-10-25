@@ -38,6 +38,7 @@ pub(crate) mod m20260724_000001_alter_users_locale;
 pub(crate) mod m20260817_000001_rekey_search_index;
 pub(crate) mod m20260824_000001_file_tokens_source;
 pub(crate) mod m20260828_000001_retokenize_search_index;
+pub(crate) mod m20261019_000001_create_trashed_files;
 
 #[cfg(test)]
 mod share_events_rebuild_test;
@@ -86,6 +87,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260817_000001_rekey_search_index::Migration),
             Box::new(m20260824_000001_file_tokens_source::Migration),
             Box::new(m20260828_000001_retokenize_search_index::Migration),
+            Box::new(m20261019_000001_create_trashed_files::Migration),
         ]
     }
 }

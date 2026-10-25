@@ -2,11 +2,12 @@ pub(crate) mod cached;
 pub(crate) mod manage;
 pub(crate) mod query;
 pub(crate) mod tokens;
+pub(crate) mod trash;
 pub(crate) mod versions;
 
 use crate::data::app_file::AppFile;
 
-use self::{manage::Manage, query::Query, tokens::Tokens, versions::Versions};
+use self::{manage::Manage, query::Query, tokens::Tokens, trash::Trash, versions::Versions};
 use entity::{
     files, links, numeric::Numeric, user_files, users, ColumnTrait, ConnectionTrait, EntityTrait,
     Expr, IntoCondition, JoinType, QueryFilter, QuerySelect, RelationTrait, Select, Uuid, Value,
@@ -69,6 +70,15 @@ where
         Versions::<'repository>::new(self, owner_id)
     }
 
+    /// Trash operations: list / restore / purge / empty. Owner-only by
+    /// construction — every method re-checks the caller's owner row.
+    pub(crate) fn trash<'repository>(&'repository self, owner_id: Uuid) -> Trash<'repository, T>
+    where
+        Self: 'repository,
+    {
+        Trash::<'repository>::new(self, owner_id)
+    }
+
     /// Get the inner database connection
     pub(crate) fn connection(&self) -> &impl ConnectionTrait {
         self.connection
@@ -77,12 +87,15 @@ where
     /// Total owner-attributed bytes stored across the whole instance. Mirrors
     /// the per-user [`query::Query::used_space`] aggregate with the per-user
     /// filter dropped, so the instance ceiling counts every owned file exactly
-    /// once regardless of who owns it.
+    /// once regardless of who owns it. Trashed files don't count: their bytes
+    /// return to the caller's allowance the moment they are deleted.
     pub(crate) async fn instance_used_space(&self) -> AppResult<i64> {
         let bytes = user_files::Entity::find()
             .select_only()
             .filter(user_files::Column::IsOwner.eq(true))
             .join(JoinType::InnerJoin, user_files::Relation::Files.def())
+            .join(JoinType::LeftJoin, files::Relation::TrashedFiles.def())
+            .filter(entity::trash::Column::FileId.is_null())
             .column_as(files::Column::Size.sum(), "sum_of_size")
             .into_tuple::<Option<Numeric>>()
             .one(self.connection)
@@ -110,7 +123,7 @@ where
 
     /// Preset the selector for the given user, maybe check if the user is the owner
     pub(crate) fn selector(&self, user_id: Uuid, check_is_owner: bool) -> Select<files::Entity> {
-        self.build_selector(user_id, check_is_owner, false)
+        self.build_selector(user_id, check_is_owner, false, false)
     }
 
     /// Listing variant that leaves `files.encrypted_thumbnail` in the
@@ -123,7 +136,18 @@ where
         user_id: Uuid,
         check_is_owner: bool,
     ) -> Select<files::Entity> {
-        self.build_selector(user_id, check_is_owner, true)
+        self.build_selector(user_id, check_is_owner, true, false)
+    }
+
+    /// Selector that also matches soft-deleted rows. The trash listing
+    /// joins on `trashed_files` being present; everything else in the
+    /// codebase uses [`Self::selector`], which hides those rows.
+    pub(crate) fn selector_with_trashed(
+        &self,
+        user_id: Uuid,
+        check_is_owner: bool,
+    ) -> Select<files::Entity> {
+        self.build_selector(user_id, check_is_owner, false, true)
     }
 
     fn build_selector(
@@ -131,6 +155,7 @@ where
         user_id: Uuid,
         check_is_owner: bool,
         compact: bool,
+        include_trashed: bool,
     ) -> Select<files::Entity> {
         let mut selector = files::Entity::find().select_only();
 
@@ -172,7 +197,7 @@ where
                 }),
         };
 
-        selector.join(JoinType::InnerJoin, rel).join(
+        selector = selector.join(JoinType::InnerJoin, rel).join(
             JoinType::LeftJoin,
             files::Relation::Links
                 .def()
@@ -181,7 +206,18 @@ where
                         .eq(user_id)
                         .into_condition()
                 }),
-        )
+        );
+
+        // Soft-delete filter: the anti-join hides every trashed row from the
+        // whole read path (listings, search, by_id lookups, downloads). The
+        // join itself is always present — the trash listing flips the filter
+        // to `IS NOT NULL` — but it only bites when `include_trashed` is off.
+        selector = selector.join(JoinType::LeftJoin, files::Relation::TrashedFiles.def());
+        if !include_trashed {
+            selector = selector.filter(entity::trash::Column::FileId.is_null());
+        }
+
+        selector
     }
 
     /// Stamp `owner_email` onto each non-owner row in `files`. Owner-of-file

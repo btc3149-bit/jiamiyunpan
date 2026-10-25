@@ -6,14 +6,15 @@ use entity::{
     TransactionTrait,
 };
 use error::{AppResult, Error};
-use fs::prelude::*;
 
 use crate::{data::delete_many::DeleteMany, repository::Repository};
 
-/// Bulk delete. Each id is dispatched by ownership — owner ids
-/// cascade, non-owner ids self-remove, ids with no row are 403. All
-/// happens in one DB transaction so a partial failure rolls back the
-/// caller's view of every requested target.
+/// Bulk delete. Each id is dispatched by ownership — owner ids move to
+/// the trash (soft delete, whole subtree stamped in `trashed_files`),
+/// non-owner ids self-remove, ids with no row are 403. All happens in one
+/// DB transaction so a partial failure rolls back the caller's view of
+/// every requested target. Nothing is physically purged here — the trash's
+/// permanent-delete route and the retention sweep own that.
 #[route("/api/storage/delete-many", method = "POST")]
 pub(crate) async fn delete_many(
     claims: Claims,
@@ -23,7 +24,6 @@ pub(crate) async fn delete_many(
     let context = context.into_inner();
     let ids = data.into_inner().into_value()?;
 
-    let fs = Fs::new(&context.config);
     let connection = context.db.begin().await?;
 
     let perms = permissions_for(&connection, &ids, claims.sub).await?;
@@ -41,14 +41,12 @@ pub(crate) async fn delete_many(
         }
     }
 
-    let mut files = if to_cascade.is_empty() {
-        Vec::new()
-    } else {
+    if !to_cascade.is_empty() {
         Repository::new(&connection)
             .manage(claims.sub)
-            .delete_many(to_cascade)
-            .await?
-    };
+            .trash_many(to_cascade)
+            .await?;
+    }
     if !to_self_remove.is_empty() {
         Repository::new(&connection)
             .manage(claims.sub)
@@ -56,14 +54,6 @@ pub(crate) async fn delete_many(
             .await?;
     }
     connection.commit().await?;
-
-    for file in files.iter_mut() {
-        if file.is_file() {
-            // purge_all wipes every version directory AND any leftover
-            // legacy chunks — safe on files never touched post-migration.
-            fs.purge_all(file).await?;
-        }
-    }
 
     Ok(HttpResponse::NoContent().finish())
 }

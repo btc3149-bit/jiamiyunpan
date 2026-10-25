@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { mdiClose, mdiLogout, mdiCellphoneLink } from '@mdi/js'
+import { mdiClose, mdiLogout, mdiCellphoneLink, mdiTrashCanOutline } from '@mdi/js'
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { store as style } from '!/style'
@@ -79,6 +79,17 @@ const getAppsItem = computed(() => ({
   rel: 'noopener noreferrer'
 }))
 
+/**
+ * Trash entry point. Lives below the main menu — it is a destination, not
+ * a file-tree section, and it needs no keypair to be clickable (the view
+ * itself waits for one before listing).
+ */
+const trashItem = computed(() => ({
+  label: t('files.trash.navLabel'),
+  icon: mdiTrashCanOutline,
+  to: { name: 'trash' }
+}))
+
 const name = computed(() => import.meta.env.APP_NAME || '甲米云盘')
 const version = computed(() => import.meta.env.APP_VERSION || '')
 
@@ -135,6 +146,8 @@ const logoutAction = async () => {
           </template>
           <AsideMenuList v-else :menu="[item]" @menu-click="menuClick" />
         </template>
+
+        <AsideMenuList :menu="[trashItem]" @menu-click="menuClick" />
       </div>
 
       <ul>

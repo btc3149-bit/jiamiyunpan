@@ -6,14 +6,14 @@ use entity::{
     TransactionTrait, Uuid,
 };
 use error::{AppResult, Error};
-use fs::prelude::*;
 
 use crate::repository::Repository;
 
-/// Delete a file or directory by id. Owner → cascade delete (file +
-/// chunks + recipients). Reader / Editor / Co-owner → self-remove only
-/// (drop caller's `user_files` row, recursively for folders). None →
-/// 403.
+/// Delete a file or directory by id. Owner → move to trash (soft delete:
+/// the row and its subtree are stamped in `trashed_files` and vanish from
+/// every listing; nothing is purged until the trash empties it or the
+/// retention sweep runs). Reader / Editor / Co-owner → self-remove only
+/// (drop caller's `user_files` row, recursively for folders). None → 403.
 #[route("/api/storage/{file_id}", method = "DELETE")]
 pub(crate) async fn delete(
     req: HttpRequest,
@@ -23,22 +23,16 @@ pub(crate) async fn delete(
     let context = context.into_inner();
     let file_id: Uuid = util::actix::path_var(&req, "file_id")?;
 
-    let fs = Fs::new(&context.config);
     let connection = context.db.begin().await?;
 
     let perm = permission(&connection, file_id, claims.sub).await?;
     match perm {
         SharePermission::Owner => {
-            let mut files = Repository::new(&connection)
+            Repository::new(&connection)
                 .manage(claims.sub)
-                .delete_many(vec![file_id])
+                .trash_many(vec![file_id])
                 .await?;
             connection.commit().await?;
-            for file in files.iter_mut() {
-                if file.is_file() {
-                    fs.purge_all(file).await?;
-                }
-            }
         }
         SharePermission::CoOwner | SharePermission::Editor | SharePermission::Reader => {
             Repository::new(&connection)

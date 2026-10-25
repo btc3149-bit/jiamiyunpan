@@ -20,10 +20,11 @@ const emits = defineEmits<{
 const isDirectory = computed(() => props.modelValue?.mime === 'dir')
 
 /**
- * Deleting is permanent — there is no trash to fall back on — so a folder,
- * which takes everything under it, asks for its name to be typed. A single
- * file is one row the reader can see and name in the sentence above, and does
- * not earn the extra friction.
+ * Deleting is no longer permanent — the file lands in the trash and can be
+ * restored for the retention window. A folder still asks for its name to be
+ * typed: it takes everything under it into the trash at once, and that
+ * scale is what earns the extra friction. A single file is one row the
+ * reader can see and name in the sentence above, and does not earn it.
  */
 const typed = ref('')
 
@@ -56,7 +57,7 @@ const confirmRemove = async () => {
     :title="$t('common.delete')"
     button="danger"
     :model-value="!!props.modelValue"
-    :button-label="$t('files.delete.confirmLabel')"
+    :button-label="$t('files.trash.moveToTrashLabel')"
     :has-cancel="true"
     :confirm-disabled="confirmDisabled"
     @cancel="emits('update:modelValue', undefined)"
@@ -65,14 +66,14 @@ const confirmRemove = async () => {
     <p>
       {{
         isDirectory
-          ? $t('files.delete.confirmDirectory', { name: props.modelValue?.name })
-          : $t('files.delete.confirmFile', { name: props.modelValue?.name })
+          ? $t('files.trash.deleteConfirmDirectory', { name: props.modelValue?.name })
+          : $t('files.trash.deleteConfirmFile', { name: props.modelValue?.name })
       }}
     </p>
 
     <label v-if="isDirectory" class="block mt-4 text-sm">
       <span class="block mb-1.5">
-        {{ $t('files.delete.typeName', { name: props.modelValue?.name }) }}
+        {{ $t('files.trash.typeName', { name: props.modelValue?.name }) }}
       </span>
       <input
         v-model="typed"

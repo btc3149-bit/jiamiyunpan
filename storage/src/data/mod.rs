@@ -14,4 +14,5 @@ pub mod response;
 pub mod search;
 pub mod set_editable;
 pub mod stats;
+pub mod trash;
 pub mod update_hashes;

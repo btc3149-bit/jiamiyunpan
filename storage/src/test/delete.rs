@@ -1,8 +1,9 @@
 use crate::{mock::create_file, repository::Repository};
 use context::Context;
+use entity::EntityTrait;
 
 #[actix_web::test]
-async fn create_recursive_mess_to_test_delete_many() {
+async fn create_recursive_mess_to_test_trash_many() {
     let context = Context::mock_sqlite().await;
     let repository = Repository::new(&context.db);
     let user = entity::mock::create_user(&context.db, "first@test.com", None).await;
@@ -79,9 +80,12 @@ async fn create_recursive_mess_to_test_delete_many() {
 
     let ids = manual.iter().map(|f| f.id).collect::<Vec<_>>();
 
-    let delete_files = repository
+    // Soft delete: every owned row in the trashed subtrees gets one
+    // `trashed_files` marker sharing the same deletion timestamp; the file
+    // rows themselves stay.
+    let trashed_files = repository
         .manage(user.id)
-        .delete_many(ids.clone())
+        .trash_many(ids.clone())
         .await
         .unwrap();
 
@@ -89,7 +93,33 @@ async fn create_recursive_mess_to_test_delete_many() {
         assert!(file.is_owner);
     }
 
-    assert_ne!(delete_files.len(), 0);
+    assert_ne!(trashed_files.len(), 0);
 
-    assert_eq!(manual.len(), delete_files.len());
+    assert_eq!(manual.len(), trashed_files.len());
+
+    let deleted_at = entity::trash::Entity::find_by_id(dir_id)
+        .one(&context.db)
+        .await
+        .unwrap()
+        .expect("dir must carry a trash marker")
+        .deleted_at;
+
+    let markers = entity::trash::Entity::find()
+        .all(&context.db)
+        .await
+        .unwrap();
+    assert_eq!(markers.len(), manual.len());
+    assert!(markers
+        .iter()
+        .all(|m| m.deleted_at == deleted_at));
+
+    // The rows themselves are untouched — only the retention sweep or a
+    // permanent delete removes them.
+    for file in manual.iter() {
+        let row = entity::files::Entity::find_by_id(file.id)
+            .one(&context.db)
+            .await
+            .unwrap();
+        assert!(row.is_some());
+    }
 }

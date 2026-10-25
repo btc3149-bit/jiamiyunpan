@@ -34,6 +34,15 @@ const router = createRouter({
       component: () => import('../views/files/FileView.vue')
     },
     {
+      path: '/trash',
+      name: 'trash',
+      meta: {
+        files: true,
+        title: 'files.trash.title'
+      },
+      component: () => import('../views/files/TrashView.vue')
+    },
+    {
       path: '/notes/:id?',
       name: 'notes',
       meta: {

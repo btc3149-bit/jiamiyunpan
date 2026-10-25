@@ -16,6 +16,7 @@ pub mod sessions;
 pub mod share_events;
 pub mod share_group_members;
 pub mod share_groups;
+pub mod trash;
 pub mod used_nonces;
 pub mod user_actions;
 pub mod user_files;

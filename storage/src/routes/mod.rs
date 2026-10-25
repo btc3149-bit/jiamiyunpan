@@ -21,6 +21,7 @@ pub mod search;
 pub mod set_editable;
 pub mod stats;
 pub mod thumbnail;
+pub mod trash;
 pub mod update_hashes;
 pub mod upload;
 pub(crate) mod upload_tar;
@@ -56,8 +57,15 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
     // Registers before the catch-all `GET /api/storage/{file_id}` below —
     // actix-web walks services in registration order, so the download route
     // otherwise matches this path with `file_id = "reindex"` and fails on the
-    // UUID parse.
+    // UUID parse. Same reasoning puts every trash route ahead of the catch-
+    // all GET and POST upload routes (`/api/storage/trash` and
+    // `/api/storage/trash/empty` would otherwise parse "trash" / "empty" as
+    // a file id).
     cfg.service(reindex::pending);
+    cfg.service(trash::list);
+    cfg.service(trash::empty);
+    cfg.service(trash::restore);
+    cfg.service(trash::purge);
     cfg.service(download::download);
     cfg.service(download::head);
     cfg.service(content_tokens::content_tokens);

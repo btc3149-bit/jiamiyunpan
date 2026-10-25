@@ -390,7 +390,7 @@ export const store = defineStore('upload', () => {
       const { store: cryptoStore } = await import('../../crypto')
       const keypair = cryptoStore().keypair
       if (keypair?.input) {
-        return push(keypair, file.file, file.file_id)
+        return push(keypair, file.file, file.file_id ?? undefined)
       }
     }
 

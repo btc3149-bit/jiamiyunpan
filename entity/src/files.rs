@@ -94,6 +94,11 @@ pub enum Relation {
     Links,
     #[sea_orm(has_many = "super::file_versions::Entity")]
     FileVersions,
+    /// Soft-delete marker side table. Left-joined by every listing selector
+    /// with a `trashed_files.file_id IS NULL` filter so trashed rows vanish
+    /// from the whole read path; the trash routes flip the filter.
+    #[sea_orm(has_one = "super::trash::Entity")]
+    TrashedFiles,
 }
 
 pub struct ChildFilesLink;
@@ -129,6 +134,12 @@ impl Related<super::file_tokens::Entity> for Entity {
 impl Related<super::file_versions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::FileVersions.def()
+    }
+}
+
+impl Related<super::trash::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TrashedFiles.def()
     }
 }
 

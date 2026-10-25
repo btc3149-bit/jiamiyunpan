@@ -49,23 +49,23 @@ const confirmRemoveAll = async () => {
 
 <template>
   <CardBoxModal
-    :title="$t('files.delete.selectedTitle')"
+    :title="$t('files.trash.selectedTitle')"
     button="danger"
     :model-value="props.modelValue"
-    :button-label="$t('files.delete.confirmLabel')"
+    :button-label="$t('files.trash.moveToTrashLabel')"
     :has-cancel="true"
     :confirm-disabled="confirmDisabled"
     @cancel="emits('update:modelValue', false)"
     @confirm="confirmRemoveAll"
   >
     <template v-if="needsTyping">
-      <p>{{ $t('files.delete.confirmMany', { count }) }}</p>
+      <p>{{ $t('files.trash.deleteConfirmMany', { count }) }}</p>
       <p v-if="folders" class="mt-1 text-sm text-brownish-400 dark:text-brownish-50">
-        {{ $t('files.delete.confirmManyFolders', { count: folders }) }}
+        {{ $t('files.trash.deleteConfirmManyFolders', { count: folders }) }}
       </p>
 
       <label class="block mt-4 text-sm">
-        <span class="block mb-1.5">{{ $t('files.delete.typeCount', { count }) }}</span>
+        <span class="block mb-1.5">{{ $t('files.trash.typeCount', { count }) }}</span>
         <input
           v-model="typed"
           type="text"
@@ -81,8 +81,8 @@ const confirmRemoveAll = async () => {
       <p>
         {{
           file?.mime === 'dir'
-            ? $t('files.delete.confirmDirectory', { name: file?.name })
-            : $t('files.delete.confirmFile', { name: file?.name })
+            ? $t('files.trash.deleteConfirmDirectory', { name: file?.name })
+            : $t('files.trash.deleteConfirmFile', { name: file?.name })
         }}
       </p>
     </template>

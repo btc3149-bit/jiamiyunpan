@@ -23,6 +23,7 @@ export * from './login'
 export * from './queue'
 export * from './register'
 export * from './shares'
+export * from './trash'
 export * from './worker'
 
 export type UploadStore = ReturnType<typeof uploadStore>

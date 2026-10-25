@@ -140,6 +140,29 @@ pub async fn engage(context: Context) -> AppResult<()> {
     // of the boot.
     fs::direct::probe(&context.config).await;
 
+    // Trash retention sweep: runs once at boot and then every 24 hours,
+    // purging trashed files older than TRASH_RETENTION_DAYS (default 30).
+    // The DB connection is a cheap clone (a pool handle); chunk purges fan
+    // out through the same Fs dispatch the routes use.
+    let cleanup_context = context.clone();
+    actix_web::rt::spawn(async move {
+        let retention = cleanup_context.config.app.trash_retention_days;
+        loop {
+            let fs = Fs::new(&cleanup_context.config);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or_default();
+            match storage::cleanup::purge_expired(&cleanup_context.db, &fs, now, retention).await {
+                Ok(0) => {}
+                Ok(n) => log::info!("trash sweep: purged {n} expired items"),
+                Err(e) => log::error!("trash sweep failed: {e}"),
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+
     let bind_address = context.config.get_full_bind_address();
     let disabled = context.config.ssl.disabled;
     let app_url = context.config.get_app_url();

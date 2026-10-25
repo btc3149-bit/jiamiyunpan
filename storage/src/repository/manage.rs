@@ -483,10 +483,17 @@ where
         self.repository.by_id(file.id, file.user_id).await
     }
 
-    /// Delete many files or directories for the owner. Each id in `ids`
-    /// must be one the caller owns; non-owner
-    /// ids are routed to [`Self::self_remove_recursive`] instead.
-    pub(crate) async fn delete_many(&self, ids: Vec<Uuid>) -> AppResult<Vec<AppFile>> {
+    /// Soft-delete many files or folders for the owner — move the whole
+    /// subtree into the trash instead of purging it. Every live row in
+    /// each subtree is stamped with one `trashed_files` row sharing the
+    /// same `deleted_at`, which is what lets a later restore of the root
+    /// bring back exactly this operation's files (a child trashed
+    /// separately earlier keeps its older stamp and stays in the trash).
+    ///
+    /// Already-trashed descendants are invisible to `file_tree` and are
+    /// left alone. No chunk storage is touched — the retention sweep and
+    /// the trash's permanent-delete route own the physical purge.
+    pub(crate) async fn trash_many(&self, ids: Vec<Uuid>) -> AppResult<Vec<AppFile>> {
         let mut files = try_join_all(ids.into_iter().map(|id| self.file_tree(id)))
             .await?
             .into_iter()
@@ -499,11 +506,21 @@ where
         files.sort_by_key(|a| a.id);
         files.dedup_by(|a, b| a.id == b.id);
 
-        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+        if files.is_empty() {
+            return Ok(files);
+        }
 
-        files::Entity::delete_many()
-            .filter(files::Column::Id.is_in(ids))
-            .exec(self.repository.connection())
+        let now = Utc::now().timestamp();
+        let rows = files
+            .iter()
+            .map(|f| entity::trash::ActiveModel {
+                file_id: ActiveValue::Set(f.id),
+                deleted_at: ActiveValue::Set(now),
+            })
+            .collect::<Vec<_>>();
+
+        entity::trash::Entity::insert_many(rows)
+            .exec_without_returning(self.repository.connection())
             .await?;
 
         Ok(files)

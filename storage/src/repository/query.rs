@@ -2,8 +2,8 @@
 //! them for only the files where the user has the file shared with him.
 
 use entity::{
-    files, numeric::Numeric, user_files, ColumnTrait, ConnectionTrait,
-    EntityTrait, Expr, IntoCondition, JoinType, QueryFilter, QuerySelect, RelationTrait, Uuid,
+    files, numeric::Numeric, trash, user_files, ColumnTrait, ConnectionTrait, EntityTrait, Expr,
+    IntoCondition, JoinType, QueryFilter, QuerySelect, RelationTrait, Uuid,
 };
 use error::AppResult;
 
@@ -56,6 +56,10 @@ where
                             .into_condition()
                     }),
             )
+            // Soft-deleted files leave the quota the moment they are
+            // trashed — restoring them re-charges the bytes.
+            .join(JoinType::LeftJoin, files::Relation::TrashedFiles.def())
+            .filter(trash::Column::FileId.is_null())
             .column_as(files::Column::Size.sum(), "sum_of_size")
             .group_by(user_files::Column::UserId)
             .into_tuple::<Option<Numeric>>()
@@ -73,6 +77,8 @@ where
         let stats = files::Entity::find()
             .select_only()
             .filter(files::Column::Mime.ne("dir"))
+            .join(JoinType::LeftJoin, files::Relation::TrashedFiles.def())
+            .filter(trash::Column::FileId.is_null())
             .column_as(files::Column::Mime, "mime")
             .column_as(files::Column::Size.sum(), "size")
             .column_as(files::Column::Id.count(), "count")

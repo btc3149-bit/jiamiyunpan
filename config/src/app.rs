@@ -140,6 +140,14 @@ pub struct AppConfig {
     /// a tenant admin repeatedly hitting the test button would amount to
     /// self-inflicted mail spam.
     pub mailer_disable_test: bool,
+
+    /// TRASH_RETENTION_DAYS — how many days a soft-deleted ("trashed")
+    /// file is kept before the background sweep purges it for good.
+    ///
+    /// *optional*
+    ///
+    /// default: 30
+    pub trash_retention_days: u64,
 }
 
 impl AppConfig {
@@ -170,6 +178,9 @@ impl AppConfig {
         let storage_instance_quota_bytes = vars.maybe_var::<u64>("STORAGE_INSTANCE_QUOTA_BYTES");
         let mailer_disable_test = vars.var_default("MAILER_DISABLE_TEST", false).get();
         let tar_transfer_disabled = vars.var_default("TAR_TRANSFER_DISABLED", false).get();
+        let trash_retention_days = vars
+            .var_default::<u64>("TRASH_RETENTION_DAYS", 30)
+            .get();
 
         vars.panic_if_errors("AppConfig");
 
@@ -188,6 +199,7 @@ impl AppConfig {
             storage_instance_quota_bytes: storage_instance_quota_bytes.maybe_get(),
             mailer_disable_test,
             tar_transfer_disabled,
+            trash_retention_days,
         }
         .set_env()
     }
