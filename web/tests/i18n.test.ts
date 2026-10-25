@@ -2,10 +2,31 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { i18n, setLocale, detectLocale, translateErrorCode } from '../src/i18n'
 import { localeKey } from '../src/config'
 import { formatRelative, formatSize } from '../services'
+import en from '../src/locales/en.json'
+import zh from '../src/locales/zh.json'
 
 afterEach(() => {
   localStorage.removeItem(localeKey)
   i18n.global.locale.value = 'en'
+})
+
+/** Flatten nested message objects into dot-separated key paths. */
+function flatten(
+  obj: Record<string, unknown>,
+  prefix = ''
+): string[] {
+  return Object.entries(obj).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key
+    return typeof value === 'object' && value !== null
+      ? flatten(value as Record<string, unknown>, path)
+      : [path]
+  })
+}
+
+describe('locale key alignment', () => {
+  it('zh contains exactly the same keys as en, in the same order', () => {
+    expect(flatten(zh)).toEqual(flatten(en))
+  })
 })
 
 describe('locale detection', () => {
@@ -21,6 +42,19 @@ describe('locale detection', () => {
   it('ignores stored values outside the supported set', () => {
     localStorage[localeKey] = 'xx'
     expect(detectLocale()).toBe('en')
+  })
+
+  it('detects zh from a Chinese browser language', () => {
+    const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'language')
+    Object.defineProperty(navigator, 'language', {
+      value: 'zh-CN',
+      configurable: true
+    })
+    try {
+      expect(detectLocale()).toBe('zh')
+    } finally {
+      if (original) Object.defineProperty(Navigator.prototype, 'language', original)
+    }
   })
 
   it('persists the choice and switches the active locale', () => {
@@ -73,6 +107,9 @@ describe('locale aware formatting', () => {
 
     setLocale('de')
     expect(formatRelative(now - 3600 * 5, now)).toBe('vor 5 Stunden')
+
+    setLocale('zh')
+    expect(formatRelative(now - 120, now)).toBe('2 分钟前')
   })
 
   it('formats sizes with the locale decimal separator', () => {

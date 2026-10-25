@@ -1,11 +1,18 @@
 import { createI18n } from 'vue-i18n'
-import { enUS, fr as frFR, de as deDE, hr as hrHR } from 'date-fns/locale'
+import {
+  enUS,
+  fr as frFR,
+  de as deDE,
+  hr as hrHR,
+  zhCN
+} from 'date-fns/locale'
 import type { Locale as DateFnsLocale } from 'date-fns'
 import { localeKey } from '@/config'
 import en from '@/locales/en.json'
 import fr from '@/locales/fr.json'
 import de from '@/locales/de.json'
 import hr from '@/locales/hr.json'
+import zh from '@/locales/zh.json'
 
 /**
  * Native-language labels, shown in the language picker exactly as written
@@ -15,7 +22,8 @@ export const SUPPORTED_LOCALES = {
   en: 'English',
   fr: 'Français',
   de: 'Deutsch',
-  hr: 'Hrvatski'
+  hr: 'Hrvatski',
+  zh: '简体中文'
 } as const
 
 export type SupportedLocale = keyof typeof SUPPORTED_LOCALES
@@ -24,7 +32,8 @@ const dateFnsLocales: Record<SupportedLocale, DateFnsLocale> = {
   en: enUS,
   fr: frFR,
   de: deDE,
-  hr: hrHR
+  hr: hrHR,
+  zh: zhCN
 }
 
 function isSupported(locale: string): locale is SupportedLocale {
@@ -70,7 +79,7 @@ export const i18n = createI18n({
   locale: detectLocale(),
   fallbackLocale: 'en',
   pluralRules: { hr: croatianPluralRule },
-  messages: { en, fr, de, hr }
+  messages: { en, fr, de, hr, zh }
 })
 
 export function currentLocale(): SupportedLocale {
