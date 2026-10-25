@@ -1,7 +1,11 @@
 use context::Context;
 
 use crate::{
-    data::{app_link::AppLink, create_link::CreateLink},
+    data::{
+        app_link::AppLink,
+        create_link::CreateLink,
+        update::Update,
+    },
     repository::Repository,
 };
 
@@ -26,6 +30,8 @@ async fn create_link(
         encrypted_thumbnail: None,
         encrypted_file_key: Some("test-file-key".to_string()),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
 
     repository.create(create_link, user).await.unwrap()
@@ -61,6 +67,8 @@ async fn test_create_link() {
         encrypted_thumbnail: None,
         encrypted_file_key: Some("test-file-key".to_string()),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
 
     let res = repository.create(create_link, &user).await;
@@ -72,7 +80,7 @@ async fn test_create_link() {
     assert_eq!(&link.owner_id, &user.id);
     assert_eq!(&link.owner_email, &user.email);
 
-    repository.increment_downloads(link.id).await.unwrap();
+    assert!(repository.try_increment_downloads(link.id).await.unwrap());
 
     let link = repository.get(link.id).await.unwrap();
 
@@ -139,6 +147,8 @@ async fn test_getting_multiple_links_from_the_all_method() {
         encrypted_thumbnail: None,
         encrypted_file_key: Some("test-file-key".to_string()),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
 
     let res = repository.create(create_link, &user).await;
@@ -150,9 +160,213 @@ async fn test_getting_multiple_links_from_the_all_method() {
     assert_eq!(&link.owner_id, &user.id);
     assert_eq!(&link.owner_email, &user.email);
 
-    repository.increment_downloads(link.id).await.unwrap();
+    assert!(repository.try_increment_downloads(link.id).await.unwrap());
 
     let link = repository.get(link.id).await.unwrap();
 
     assert_eq!(link.downloads, 1);
+}
+
+#[actix_web::test]
+async fn test_create_link_with_password_hashes_and_flags() {
+    let context = Context::mock_sqlite().await;
+    let private_key = cryptfns::rsa::private::generate().unwrap();
+    let public_key = cryptfns::rsa::public::from_private(&private_key).unwrap();
+    let private_key_string = cryptfns::rsa::private::to_string(&private_key).unwrap();
+    let public_key_string = cryptfns::rsa::public::to_string(&public_key).unwrap();
+
+    let user = entity::mock::create_user(
+        &context.db,
+        "pw-owner@test.com",
+        Some(public_key_string),
+    )
+    .await;
+
+    let (file, _user_file) =
+        entity::mock::create_file(&context.db, &user, "pw-file", "application/json", None).await;
+
+    let signature =
+        cryptfns::rsa::private::sign(&file.id.to_string(), &private_key_string).unwrap();
+
+    let repository = Repository::new(&context);
+
+    let create_link = CreateLink {
+        file_id: Some(file.id.to_string()),
+        signature: Some(signature),
+        encrypted_name: Some("pw-file".to_string()),
+        encrypted_link_key: Some("test-link-key".to_string()),
+        encrypted_thumbnail: None,
+        encrypted_file_key: Some("test-file-key".to_string()),
+        expires_at: None,
+        password: Some("sesame-42".to_string()),
+        max_downloads: Some(2),
+    };
+
+    let link = repository.create(create_link, &user).await.unwrap();
+
+    assert!(link.has_password);
+    assert_eq!(link.max_downloads, Some(2));
+
+    // The hash is bcrypt of the plaintext, not the plaintext itself, and it
+    // verifies against it.
+    let hash = link.password_hash.clone().unwrap();
+    assert_ne!(hash, "sesame-42");
+    assert!(util::password::verify("sesame-42", &hash));
+    assert!(!util::password::verify("wrong", &hash));
+
+    // An empty password means "no password", never a lock on the empty
+    // string.
+    let (file2, _uf) =
+        entity::mock::create_file(&context.db, &user, "pw-file-2", "application/json", None).await;
+    let signature2 =
+        cryptfns::rsa::private::sign(&file2.id.to_string(), &private_key_string).unwrap();
+    let empty = CreateLink {
+        file_id: Some(file2.id.to_string()),
+        signature: Some(signature2),
+        encrypted_name: Some("pw-file-2".to_string()),
+        encrypted_link_key: Some("test-link-key".to_string()),
+        encrypted_thumbnail: None,
+        encrypted_file_key: Some("test-file-key".to_string()),
+        expires_at: None,
+        password: Some(String::new()),
+        max_downloads: Some(0),
+    };
+
+    let link2 = repository.create(empty, &user).await.unwrap();
+    assert!(!link2.has_password);
+    assert!(link2.password_hash.is_none());
+    // A cap of 0 is not a cap of "zero downloads forever" — it's ignored.
+    assert_eq!(link2.max_downloads, None);
+}
+
+#[actix_web::test]
+async fn test_try_increment_respects_max_downloads() {
+    let context = Context::mock_sqlite().await;
+    let private_key = cryptfns::rsa::private::generate().unwrap();
+    let public_key = cryptfns::rsa::public::from_private(&private_key).unwrap();
+    let private_key_string = cryptfns::rsa::private::to_string(&private_key).unwrap();
+    let public_key_string = cryptfns::rsa::public::to_string(&public_key).unwrap();
+
+    let user = entity::mock::create_user(
+        &context.db,
+        "cap-owner@test.com",
+        Some(public_key_string),
+    )
+    .await;
+
+    let (file, _user_file) =
+        entity::mock::create_file(&context.db, &user, "cap-file", "application/json", None).await;
+
+    let signature =
+        cryptfns::rsa::private::sign(&file.id.to_string(), &private_key_string).unwrap();
+
+    let repository = Repository::new(&context);
+
+    let create_link = CreateLink {
+        file_id: Some(file.id.to_string()),
+        signature: Some(signature),
+        encrypted_name: Some("cap-file".to_string()),
+        encrypted_link_key: Some("test-link-key".to_string()),
+        encrypted_thumbnail: None,
+        encrypted_file_key: Some("test-file-key".to_string()),
+        expires_at: None,
+        password: None,
+        max_downloads: Some(1),
+    };
+
+    let link = repository.create(create_link, &user).await.unwrap();
+    assert!(link.is_download_exhausted() == false);
+
+    assert!(repository.try_increment_downloads(link.id).await.unwrap());
+
+    // The cap is spent: the conditional UPDATE matches nothing, the counter
+    // stays put, and every further attempt is refused.
+    assert!(!repository.try_increment_downloads(link.id).await.unwrap());
+    assert!(!repository.try_increment_downloads(link.id).await.unwrap());
+
+    let link = repository.get(link.id).await.unwrap();
+    assert_eq!(link.downloads, 1);
+    assert!(link.is_download_exhausted());
+}
+
+#[actix_web::test]
+async fn test_update_link_protection_fields() {
+    let context = Context::mock_sqlite().await;
+    let private_key = cryptfns::rsa::private::generate().unwrap();
+    let public_key = cryptfns::rsa::public::from_private(&private_key).unwrap();
+    let private_key_string = cryptfns::rsa::private::to_string(&private_key).unwrap();
+    let public_key_string = cryptfns::rsa::public::to_string(&public_key).unwrap();
+
+    let user = entity::mock::create_user(
+        &context.db,
+        "update-owner@test.com",
+        Some(public_key_string),
+    )
+    .await;
+
+    let link = create_link(&context, &user, &private_key_string, "update-file").await;
+    assert!(!link.has_password);
+
+    let repository = Repository::new(&context);
+
+    // Set a password and a cap.
+    let updated = repository
+        .update(
+            link.id,
+            user.id,
+            Update::into_value(Update {
+                expires_at: None,
+                password: Some("new-secret".to_string()),
+                remove_password: None,
+                max_downloads: Some(3),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(updated.has_password);
+    assert_eq!(updated.max_downloads, Some(3));
+    let hash = updated.password_hash.clone().unwrap();
+    assert!(util::password::verify("new-secret", &hash));
+
+    // Absent fields keep their value.
+    let kept = repository
+        .update(
+            link.id,
+            user.id,
+            Update::into_value(Update {
+                expires_at: Some(12345),
+                password: None,
+                remove_password: None,
+                max_downloads: None,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(kept.has_password);
+    assert_eq!(kept.max_downloads, Some(3));
+    assert_eq!(kept.expires_at, Some(12345));
+
+    // Max 0 clears the cap; remove_password clears the hash.
+    let cleared = repository
+        .update(
+            link.id,
+            user.id,
+            Update::into_value(Update {
+                expires_at: None,
+                password: None,
+                remove_password: Some(true),
+                max_downloads: Some(0),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!cleared.has_password);
+    assert!(cleared.password_hash.is_none());
+    assert_eq!(cleared.max_downloads, None);
 }

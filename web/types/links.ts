@@ -35,6 +35,17 @@ export interface CreateLink {
    * Expiration date of the link
    */
   expires_at?: string
+
+  /**
+   * Optional plaintext download password. The server bcrypt-hashes it; the
+   * plaintext is never persisted. Empty/absent = no password.
+   */
+  password?: string
+
+  /**
+   * Optional cap on completed downloads. Absent or <= 0 = unlimited.
+   */
+  max_downloads?: number
 }
 
 export interface AppLink extends EncryptedAppLink {
@@ -61,6 +72,13 @@ export interface EncryptedAppLink {
   file_mime: string
   signature: string
   downloads: number
+
+  /** Whether the link requires a download password. The hash never leaves the server. */
+  has_password?: boolean
+
+  /** Optional cap on completed downloads. Absent = unlimited. */
+  max_downloads?: number
+
   encrypted_name: string
   encrypted_link_key: string
   encrypted_file_key?: string
@@ -95,4 +113,15 @@ export interface EncryptedLink {
   created_at: number
   expires_at?: number
   link_key_hex?: string
+}
+
+/**
+ * Owner-side protection update for an existing link. Omitted fields keep
+ * their current server value; `remove_password: true` clears the password;
+ * `max_downloads: 0` (or any value <= 0) clears the download cap.
+ */
+export interface UpdateLinkProtection {
+  password?: string
+  remove_password?: boolean
+  max_downloads?: number
 }

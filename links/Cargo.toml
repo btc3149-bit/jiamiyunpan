@@ -23,6 +23,7 @@ chrono = { workspace = true }
 cached = { workspace = true }
 
 auth = { path = "../auth" }
+config = { path = "../config" }
 context = { path = "../context" }
 cryptfns = { path = "../cryptfns" }
 entity = { path = "../entity" }

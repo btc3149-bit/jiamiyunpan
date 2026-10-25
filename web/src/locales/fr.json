@@ -739,7 +739,32 @@
     },
     "view": {
       "hasExpired": "Ce lien a expiré le {date}",
-      "willExpire": "Ce lien expirera le {date}"
+      "willExpire": "Ce lien expirera le {date}",
+      "passwordTitle": "Mot de passe requis",
+      "passwordDescription": "Ce lien est protégé par un mot de passe de téléchargement. Saisissez-le ci-dessous pour afficher et télécharger le fichier.",
+      "passwordLabel": "Mot de passe de téléchargement",
+      "passwordSubmit": "Déverrouiller",
+      "passwordError": "Mot de passe incorrect. Veuillez réessayer.",
+      "limitReached": "Ce lien a atteint sa limite de téléchargements et ne peut plus être téléchargé."
+    },
+    "protection": {
+      "title": "Protection du lien",
+      "passwordToggle": "Protéger avec un mot de passe",
+      "passwordPlaceholder": "Mot de passe de téléchargement",
+      "passwordReplacePlaceholder": "Nouveau mot de passe (remplace l'actuel)",
+      "passwordKeptHint": "Laissez vide pour conserver le mot de passe actuel.",
+      "passwordEnabledNotice": "La protection par mot de passe est activée — communiquez le mot de passe aux destinataires séparément.",
+      "passwordRemovedNotice": "Protection par mot de passe supprimée — toute personne disposant du lien peut à nouveau télécharger.",
+      "passwordRequired": "Le mot de passe de téléchargement est requis",
+      "maxDownloadsLabel": "Limite de téléchargements",
+      "maxDownloadsPlaceholder": "Illimité",
+      "maxDownloadsHint": "Nombre maximal de téléchargements terminés ; laissez vide pour illimité.",
+      "maxDownloadsValue": "Limite : {count}",
+      "downloadsWithLimit": "{done} / {max}",
+      "statusProtected": "Protégé par mot de passe",
+      "statusUnprotected": "Sans mot de passe",
+      "editProtection": "Modifier la protection",
+      "saveProtection": "Enregistrer la protection"
     }
   },
   "nav": {
@@ -909,7 +934,17 @@
     },
     "zoomFit": "Ajuster l'image à l'écran",
     "zoomIn": "Agrandir l'image",
-    "zoomOut": "Réduire l'image"
+    "zoomOut": "Réduire l'image",
+    "text": {
+      "truncated": "Aperçu tronqué — le fichier dépasse la limite de taille. Téléchargez-le pour voir tout le contenu."
+    },
+    "audio": {
+      "loading": "Chargement de l’audio… {progress}",
+      "loadError": "Échec du chargement de l’audio : {error}"
+    },
+    "docx": {
+      "loadError": "Échec du chargement du document : {error}"
+    }
   },
   "reindex": {
     "background": "Continuer en arrière-plan",

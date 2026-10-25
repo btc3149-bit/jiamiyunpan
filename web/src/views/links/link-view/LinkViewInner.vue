@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import type { AppLink, LinksStore } from 'types'
 import EnterKeyInner from './EnterKeyInner.vue'
+import LinkPasswordInner from './LinkPasswordInner.vue'
 import LinkUnavailableInner from './LinkUnavailableInner.vue'
 import { computed, ref } from 'vue'
 import type { ErrorResponse } from '!/api'
@@ -9,6 +10,7 @@ import PreviewView from '@/components/preview/PreviewView.vue'
 import { formatPrettyDate } from '!/index'
 import PreviewInfoModal from '@/components/links/modals/PreviewInfoModal.vue'
 import { useTitle } from '@vueuse/core'
+import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{
   Links: LinksStore
@@ -16,6 +18,7 @@ const props = defineProps<{
   linkKeyHex?: string
 }>()
 
+const { t } = useI18n()
 const title = useTitle()
 const infoLink = ref()
 const unlockError = ref()
@@ -26,6 +29,12 @@ const unlockError = ref()
 const linkUnavailable = ref(false)
 const typedLinkKeyHex = ref<string>()
 const link = ref<AppLink>()
+
+/** True once the link's download password was accepted this session. The
+ *  unlock route answers by setting the capability cookie, so every gated
+ *  request after this point — including the wasm-built ones — carries it. */
+const passwordUnlocked = ref(false)
+const passwordError = ref<string>()
 
 const linkKeyHex = computed({
   get: (): string | undefined => {
@@ -54,6 +63,15 @@ const isExpired = computed(() => {
   const now = new Date().valueOf() / 1000
 
   return link.value?.expires_at && link.value?.expires_at < now
+})
+
+/**
+ * A password-protected link holds the recipient at the password form until
+ * the unlock succeeded — the preview would fail on every gated request
+ * anyway. Unprotected links skip straight through.
+ */
+const needsPassword = computed(() => {
+  return link.value?.has_password === true && !passwordUnlocked.value
 })
 
 /**
@@ -109,13 +127,39 @@ const unlock = async (value: string) => {
   await load()
 }
 
+/**
+ * Exchange the download password for the capability cookie, then let the
+ * normal preview/download flow run. A wrong password keeps the form up with
+ * an inline error; a 410 from a spent download cap is terminal and says so.
+ */
+const unlockPassword = async (password: string) => {
+  passwordError.value = undefined
+
+  try {
+    await props.Links.unlock(props.id, password)
+    passwordUnlocked.value = true
+  } catch (e) {
+    const error = e as ErrorResponse<unknown>
+    if (error?.status === 410) {
+      passwordError.value = t('links.view.limitReached')
+      return
+    }
+    passwordError.value = t('links.view.passwordError')
+  }
+}
+
 await load()
 </script>
 <template>
   <PreviewInfoModal v-model="infoLink" />
 
+  <LinkPasswordInner
+    v-if="needsPassword"
+    :unlockingError="passwordError"
+    @unlock="unlockPassword"
+  />
   <PreviewView
-    v-if="preview"
+    v-else-if="preview"
     v-model="preview"
     :hideDelete="true"
     :hidePreviousAndNext="true"

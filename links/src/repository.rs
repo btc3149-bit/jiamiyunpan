@@ -10,6 +10,7 @@ use entity::{
 use error::{AppResult, Error};
 
 use crate::data::{app_link::AppLink, create_link::CreateLink};
+use crate::data::update::{MaxDownloadsChange, PasswordChange, UpdateLink};
 
 pub(crate) struct Repository<'ctx> {
     context: &'ctx Context,
@@ -75,14 +76,18 @@ impl<'ctx> Repository<'ctx> {
         Ok(())
     }
 
-    /// Update the expires_at field for a link.
+    /// Update the expires_at and protection fields for a link.
     /// If the expires at is set to before now, the link will be purged
     /// from the database when the cron service runs next time.
-    pub(crate) async fn update_expires_at(
+    ///
+    /// Protection fields (`password_hash`, `max_downloads`) follow the
+    /// `Keep`/`Set` instructions in [`UpdateLink`] — fields the client left
+    /// out of the request keep their current value.
+    pub(crate) async fn update(
         &self,
         id: Uuid,
         user_id: Uuid,
-        expires_at: Option<i64>,
+        update: UpdateLink,
     ) -> AppResult<AppLink> {
         let link = links::Entity::find_by_id(id)
             .one(&self.context.db)
@@ -93,29 +98,52 @@ impl<'ctx> Repository<'ctx> {
             return Err(Error::Forbidden("cannot_update_not_owner".to_string()));
         }
 
-        let link = links::ActiveModel {
-            expires_at: entity::ActiveValue::Set(expires_at),
+        let mut active = links::ActiveModel {
+            expires_at: entity::ActiveValue::Set(update.expires_at.unwrap_or(link.expires_at)),
             ..link.into()
         };
 
-        links::Entity::update(link).exec(&self.context.db).await?;
+        match update.password_hash {
+            PasswordChange::Keep => {}
+            PasswordChange::Set(hash) => {
+                active.password_hash = entity::ActiveValue::Set(hash);
+            }
+        }
+
+        match update.max_downloads {
+            MaxDownloadsChange::Keep => {}
+            MaxDownloadsChange::Set(max) => {
+                active.max_downloads = entity::ActiveValue::Set(max);
+            }
+        }
+
+        links::Entity::update(active).exec(&self.context.db).await?;
 
         self.get_by_id(id).await
     }
 
-    /// Increment file downloads counter.
-    pub(crate) async fn increment_downloads(&self, id: Uuid) -> AppResult<()> {
-        self.context
+    /// Increment the download counter by one, but only while the link's
+    /// `max_downloads` cap (if any) is not exhausted.
+    ///
+    /// The limit check lives inside a single `UPDATE ... WHERE`, so two
+    /// concurrent final chunks cannot both squeeze past the cap: exactly one
+    /// of them sees `rows_affected == 1`, the loser gets `false` and must
+    /// refuse the transfer. Returns `true` when the counter moved.
+    pub(crate) async fn try_increment_downloads(&self, id: Uuid) -> AppResult<bool> {
+        let result = self
+            .context
             .db
             .execute(Statement::from_sql_and_values(
                 self.context.db.get_database_backend(),
                 r"UPDATE links
                     SET downloads = downloads + 1
-                    WHERE id = $1;",
+                    WHERE id = $1
+                      AND (max_downloads IS NULL OR downloads < max_downloads);",
                 [id.into()],
             ))
             .await?;
-        Ok(())
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Get all the links for a user.

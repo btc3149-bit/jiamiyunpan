@@ -6,6 +6,7 @@ use fs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::repository::Repository;
+use crate::routes::guard;
 
 /// One chunk's presigned URL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,11 +28,22 @@ pub struct ChunkUrls {
 /// recipient decrypts with the key from the URL fragment, which never reaches
 /// this server or the storage bucket.
 ///
+/// Password-protected links demand the same credentials as the download
+/// route (header or unlock cookie) — this is the gate that matters, because
+/// on direct-transfer deployments the bucket URLs minted here bypass the
+/// relay route entirely.
+///
 /// The download counter moves here, and it counts something slightly
 /// different than it did. The relaying route waits for the final chunk before
 /// counting, so an abandoned transfer never registered. Nothing reports back
 /// once a client is talking to the bucket, so this counts a download that
 /// started.
+///
+/// With `max_downloads` set, the reservation happens inside the same atomic
+/// conditional `UPDATE` that increments: a manifest is only minted when a
+/// download slot was actually claimed. Once the cap is spent the client gets
+/// a 410 and no URLs — a presigned URL is unforgeable afterwards, so the
+/// cap holds even against the bucket.
 #[route("/api/links/{link_id}/chunk-urls", method = "POST")]
 pub(crate) async fn chunk_urls(
     req: HttpRequest,
@@ -47,6 +59,8 @@ pub(crate) async fn chunk_urls(
         return Err(Error::Unauthorized("link_expired".to_string()));
     }
 
+    guard::authorize_password(&link, &req)?;
+
     let fs = Fs::new(&context.config);
     let version = link.file_active_version;
 
@@ -61,7 +75,9 @@ pub(crate) async fn chunk_urls(
         .await?
         .ok_or_else(|| Error::BadRequest("direct_transfer_unavailable".to_string()))?;
 
-    repository.increment_downloads(link.id).await?;
+    if !repository.try_increment_downloads(link.id).await? {
+        return Ok(guard::gone());
+    }
 
     let expires_at = chrono::Utc::now().timestamp()
         + context

@@ -739,7 +739,32 @@
     },
     "view": {
       "hasExpired": "Ovaj link je istekao {date}",
-      "willExpire": "Ovaj link istječe {date}"
+      "willExpire": "Ovaj link istječe {date}",
+      "passwordTitle": "Potrebna lozinka",
+      "passwordDescription": "Ova je poveznica zaštićena lozinkom za preuzimanje. Unesite je u nastavku za pregled i preuzimanje datoteke.",
+      "passwordLabel": "Lozinka za preuzimanje",
+      "passwordSubmit": "Otključaj",
+      "passwordError": "Pogrešna lozinka. Pokušajte ponovno.",
+      "limitReached": "Ova poveznica je dosegla ograničenje preuzimanja i više se ne može preuzimati."
+    },
+    "protection": {
+      "title": "Zaštita poveznice",
+      "passwordToggle": "Zaštiti lozinkom",
+      "passwordPlaceholder": "Lozinka za preuzimanje",
+      "passwordReplacePlaceholder": "Nova lozinka (zamjenjuje trenutačnu)",
+      "passwordKeptHint": "Ostavite prazno za zadržavanje trenutačne lozinke.",
+      "passwordEnabledNotice": "Zaštita lozinkom je aktivirana — podijelite lozinku s primateljima odvojeno.",
+      "passwordRemovedNotice": "Zaštita lozinkom uklonjena — svi s poveznicom mogu ponovno preuzimati.",
+      "passwordRequired": "Potrebna je lozinka za preuzimanje",
+      "maxDownloadsLabel": "Ograničenje preuzimanja",
+      "maxDownloadsPlaceholder": "Neograničeno",
+      "maxDownloadsHint": "Maksimalan broj dovršenih preuzimanja; ostavite prazno za neograničeno.",
+      "maxDownloadsValue": "Ograničenje: {count}",
+      "downloadsWithLimit": "{done} / {max}",
+      "statusProtected": "Zaštićeno lozinkom",
+      "statusUnprotected": "Bez lozinke",
+      "editProtection": "Uredi zaštitu",
+      "saveProtection": "Spremi zaštitu"
     }
   },
   "nav": {
@@ -909,7 +934,17 @@
     },
     "zoomFit": "Prilagodi sliku zaslonu",
     "zoomIn": "Povećaj sliku",
-    "zoomOut": "Smanji sliku"
+    "zoomOut": "Smanji sliku",
+    "text": {
+      "truncated": "Pregled je skraćen — datoteka premašuje ograničenje veličine. Preuzmite je za cijeli sadržaj."
+    },
+    "audio": {
+      "loading": "Učitavanje zvuka… {progress}",
+      "loadError": "Učitavanje zvuka nije uspjelo: {error}"
+    },
+    "docx": {
+      "loadError": "Učitavanje dokumenta nije uspjelo: {error}"
+    }
   },
   "reindex": {
     "background": "Nastavi u pozadini",

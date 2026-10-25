@@ -25,6 +25,16 @@ pub struct Model {
     /// clients; decrypted server-side during a link download stream.
     #[serde(skip_serializing)]
     pub encrypted_file_key: Option<String>,
+    /// Optional download password. Stored as a bcrypt hash (same scheme as
+    /// account passwords via `util::password`); never serialized to clients —
+    /// `AppLink` exposes only `has_password`. A verified recipient receives
+    /// the hash inside a scoped capability cookie minted by the unlock route.
+    #[serde(skip_serializing)]
+    pub password_hash: Option<String>,
+    /// Optional cap on completed download sessions. `None` = unlimited.
+    /// Enforced with an atomic conditional `UPDATE` so concurrent final
+    /// chunks cannot push the counter past the cap.
+    pub max_downloads: Option<i32>,
     pub created_at: i64,
     /// Cron periodically purges expired rows' file metadata and
     /// `encrypted_file_key` to cut the attack surface on stale links.

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   mdiTrashCan,
   mdiOpenInNew,
   mdiDelete,
   mdiCheck,
   mdiPencil,
-  mdiClose
+  mdiClose,
+  mdiLock,
+  mdiLockOpenVariant
 } from '@mdi/js'
 
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -25,10 +28,12 @@ import type {
   AppLink,
   FilesStore,
   KeyPair,
-  LinksStore
+  LinksStore,
+  UpdateLinkProtection
 } from 'types'
 
 const router = useRouter()
+const { t } = useI18n()
 
 const props = defineProps<{
   /**
@@ -56,6 +61,22 @@ const loadingExpire = ref(false)
 const loadedLink = ref<AppLink | undefined>()
 const editExpire = ref(false)
 const expiresAt = ref<Date | undefined>()
+
+// --- Link protection (password + download cap), create-time and existing ---
+const protectWithPassword = ref(false)
+const linkPassword = ref('')
+const maxDownloadsInput = ref<string>('')
+const editingProtection = ref(false)
+const savingProtection = ref(false)
+const protectionNotice = ref('')
+
+const maxDownloadsNumber = computed((): number | undefined => {
+  const parsed = parseInt(maxDownloadsInput.value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+})
+
+const hasPassword = computed(() => link.value?.has_password === true)
+const maxDownloads = computed(() => link.value?.max_downloads ?? undefined)
 
 const file = computed((): AppFile | undefined => {
   if (props.source && (props.source as AppFile)?.mime) {
@@ -127,7 +148,10 @@ const create = async () => {
   if (!file.value || link.value || props.readOnly) return
   loading.value = true
   try {
-    const fresh = await props.links.create(file.value, props.kp)
+    const fresh = await props.links.create(file.value, props.kp, {
+      password: protectWithPassword.value ? linkPassword.value : undefined,
+      max_downloads: maxDownloadsNumber.value
+    })
     // `links.create` returns the decrypted link but doesn't fan out into
     // the Pinia store — surfaces that read from `Links.items` (the
     // grants store, the public-links view) stay stale until we upsert
@@ -135,12 +159,66 @@ const create = async () => {
     props.links.upsertItem(fresh)
     loadedLink.value = fresh
     emit('created', fresh)
+    if (fresh.has_password) {
+      protectionNotice.value = t('links.protection.passwordEnabledNotice')
+    }
+    // Reset the create-time form so a re-opened panel starts clean.
+    protectWithPassword.value = false
+    linkPassword.value = ''
+    maxDownloadsInput.value = ''
     // The row's link badge refreshes behind the reveal — the copyable URL
     // is what the user is waiting for, not a directory re-list.
     void props.storage.find(props.kp, file.value.file_id ?? undefined, false)
   } finally {
     loading.value = false
   }
+}
+
+/**
+ * Apply protection changes to an existing link. The server keeps every
+ * field the request leaves out, so only the touched ones travel.
+ */
+const saveProtection = async () => {
+  if (!link.value || props.readOnly) return
+  savingProtection.value = true
+  try {
+    const payload: UpdateLinkProtection = {}
+
+    if (linkPassword.value) {
+      payload.password = linkPassword.value
+    } else if (hasPassword.value && !protectWithPassword.value) {
+      payload.remove_password = true
+    }
+
+    if (maxDownloadsInput.value.trim() === '') {
+      // Empty field = unlimited, but only send it when something was set.
+      if (maxDownloads.value) payload.max_downloads = 0
+    } else if (maxDownloadsNumber.value) {
+      payload.max_downloads = maxDownloadsNumber.value
+    }
+
+    const updated = await props.links.updateProtection(link.value.id, payload)
+    props.links.upsertItem(updated)
+    loadedLink.value = updated
+
+    if (updated.has_password && !hasPassword.value) {
+      protectionNotice.value = t('links.protection.passwordEnabledNotice')
+    } else if (!updated.has_password && hasPassword.value) {
+      protectionNotice.value = t('links.protection.passwordRemovedNotice')
+    }
+
+    linkPassword.value = ''
+    editingProtection.value = false
+  } finally {
+    savingProtection.value = false
+  }
+}
+
+const startEditProtection = () => {
+  protectWithPassword.value = hasPassword.value
+  linkPassword.value = ''
+  maxDownloadsInput.value = maxDownloads.value ? String(maxDownloads.value) : ''
+  editingProtection.value = true
 }
 
 const remove = async () => {
@@ -183,6 +261,20 @@ watch(
 <template>
   <div v-if="!loading">
     <div v-if="link" class="space-y-3">
+      <div
+        v-if="protectionNotice"
+        class="px-3 py-2 rounded-lg bg-paper-200 dark:bg-brownish-800 text-brownish-700 dark:text-brownish-50 text-sm flex items-center justify-between gap-2"
+        data-testid="sharing-link-protection-notice"
+      >
+        <span class="flex items-center gap-2">
+          <BaseIcon :path="mdiLock" :size="16" />
+          {{ protectionNotice }}
+        </span>
+        <button type="button" class="shrink-0" @click.prevent="protectionNotice = ''">
+          <BaseIcon :path="mdiClose" :size="14" />
+        </button>
+      </div>
+
       <div
         v-if="isExpired"
         class="px-3 py-2 rounded-lg bg-redish-100 dark:bg-redish-900/40 text-redish-700 dark:text-redish-100 text-sm"
@@ -242,7 +334,9 @@ watch(
         </div>
         <div class="flex justify-between sm:flex-col gap-1">
           <dt class="text-xs font-medium text-brownish-300 dark:text-brownish-50">{{ $t('links.panel.downloads') }}</dt>
-          <dd class="text-right sm:text-left">{{ downloads }}</dd>
+          <dd class="text-right sm:text-left" data-testid="sharing-link-downloads">
+            {{ maxDownloads ? $t('links.protection.downloadsWithLimit', { done: downloads, max: maxDownloads }) : downloads }}
+          </dd>
         </div>
         <div class="flex justify-between sm:flex-col gap-1">
           <dt class="text-xs font-medium text-brownish-300 dark:text-brownish-50">{{ $t('links.panel.fileCreated') }}</dt>
@@ -253,6 +347,107 @@ watch(
           <dd class="text-right sm:text-left">{{ created }}</dd>
         </div>
       </dl>
+
+      <!-- Protection management: password + download cap on an existing link -->
+      <div
+        v-if="!editingProtection"
+        class="flex items-center justify-between gap-2 px-3 py-3 rounded-lg bg-paper-50 dark:bg-brownish-900/60 border border-paper-300 dark:border-brownish-700"
+        data-testid="sharing-link-protection"
+      >
+        <div class="min-w-0">
+          <div class="text-xs font-medium text-brownish-300 dark:text-brownish-50">
+            {{ $t('links.protection.title') }}
+          </div>
+          <div class="text-sm truncate flex items-center gap-1.5">
+            <BaseIcon :path="hasPassword ? mdiLock : mdiLockOpenVariant" :size="14" />
+            <span data-testid="sharing-link-password-status">
+              {{ hasPassword ? $t('links.protection.statusProtected') : $t('links.protection.statusUnprotected') }}
+            </span>
+            <span v-if="maxDownloads" class="text-brownish-300 dark:text-brownish-50">
+              · {{ $t('links.protection.maxDownloadsValue', { count: maxDownloads }) }}
+            </span>
+          </div>
+        </div>
+        <div class="flex gap-1.5 shrink-0">
+          <BaseButton
+            :title="$t('links.protection.editProtection')"
+            :icon="mdiPencil"
+            color="dark"
+            small
+            rounded-full
+            :disabled="loadingExpire || readOnly"
+            data-testid="sharing-link-protection-edit"
+            @click.prevent="startEditProtection"
+          />
+        </div>
+      </div>
+      <div
+        v-else
+        class="space-y-3 px-3 py-3 rounded-lg bg-paper-50 dark:bg-brownish-900/60 border border-paper-300 dark:border-brownish-700"
+        data-testid="sharing-link-protection-edit-form"
+      >
+        <label class="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input
+            v-model="protectWithPassword"
+            type="checkbox"
+            class="accent-redish-500"
+            :disabled="savingProtection || readOnly"
+          />
+          <BaseIcon :path="mdiLock" :size="16" />
+          <span>{{ $t('links.protection.passwordToggle') }}</span>
+        </label>
+        <input
+          v-if="protectWithPassword"
+          v-model="linkPassword"
+          type="password"
+          class="w-full px-3 py-2 text-sm rounded-lg border border-paper-300 dark:border-brownish-700 bg-white dark:bg-brownish-800 text-brownish-700 dark:text-brownish-50"
+          :placeholder="hasPassword
+            ? $t('links.protection.passwordReplacePlaceholder')
+            : $t('links.protection.passwordPlaceholder')"
+          :disabled="savingProtection || readOnly"
+          autocomplete="new-password"
+        />
+        <p v-if="hasPassword && !linkPassword" class="text-xs text-brownish-300 dark:text-brownish-50">
+          {{ $t('links.protection.passwordKeptHint') }}
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-brownish-300 dark:text-brownish-50 mb-1">
+            {{ $t('links.protection.maxDownloadsLabel') }}
+          </label>
+          <input
+            v-model="maxDownloadsInput"
+            type="number"
+            min="1"
+            class="w-full px-3 py-2 text-sm rounded-lg border border-paper-300 dark:border-brownish-700 bg-white dark:bg-brownish-800 text-brownish-700 dark:text-brownish-50"
+            :placeholder="$t('links.protection.maxDownloadsPlaceholder')"
+            :disabled="savingProtection || readOnly"
+          />
+          <p class="mt-1 text-xs text-brownish-300 dark:text-brownish-50">
+            {{ $t('links.protection.maxDownloadsHint') }}
+          </p>
+        </div>
+        <div class="flex justify-end gap-1.5">
+          <BaseButton
+            :title="$t('links.protection.saveProtection')"
+            :icon="mdiCheck"
+            color="dark"
+            small
+            rounded-full
+            :disabled="savingProtection || readOnly"
+            data-testid="sharing-link-protection-save"
+            @click.prevent="saveProtection"
+          />
+          <BaseButton
+            :title="$t('links.panel.cancelEditing')"
+            :icon="mdiClose"
+            color="dark"
+            small
+            rounded-full
+            :disabled="savingProtection"
+            @click.prevent="editingProtection = false"
+          />
+        </div>
+      </div>
 
       <div
         class="flex items-center justify-between gap-2 px-3 py-3 rounded-lg bg-paper-50 dark:bg-brownish-900/60 border border-paper-300 dark:border-brownish-700"
@@ -330,13 +525,55 @@ watch(
       <p class="text-sm text-brownish-700 dark:text-brownish-50">
         {{ $t('links.panel.noLinkYet') }}
       </p>
+
+      <div class="space-y-2" data-testid="sharing-link-protection-create">
+        <label class="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input
+            v-model="protectWithPassword"
+            type="checkbox"
+            class="accent-redish-500"
+            data-testid="sharing-link-password-toggle"
+            :disabled="readOnly"
+          />
+          <BaseIcon :path="mdiLock" :size="16" />
+          <span>{{ $t('links.protection.passwordToggle') }}</span>
+        </label>
+        <input
+          v-if="protectWithPassword"
+          v-model="linkPassword"
+          type="password"
+          class="w-full px-3 py-2 text-sm rounded-lg border border-paper-300 dark:border-brownish-700 bg-white dark:bg-brownish-800 text-brownish-700 dark:text-brownish-50"
+          :placeholder="$t('links.protection.passwordPlaceholder')"
+          :disabled="readOnly"
+          data-testid="sharing-link-password-input"
+          autocomplete="new-password"
+        />
+        <div>
+          <label class="block text-xs font-medium text-brownish-300 dark:text-brownish-50 mb-1">
+            {{ $t('links.protection.maxDownloadsLabel') }}
+          </label>
+          <input
+            v-model="maxDownloadsInput"
+            type="number"
+            min="1"
+            class="w-full px-3 py-2 text-sm rounded-lg border border-paper-300 dark:border-brownish-700 bg-white dark:bg-brownish-800 text-brownish-700 dark:text-brownish-50"
+            :placeholder="$t('links.protection.maxDownloadsPlaceholder')"
+            :disabled="readOnly"
+            data-testid="sharing-link-max-downloads-input"
+          />
+          <p class="mt-1 text-xs text-brownish-300 dark:text-brownish-50">
+            {{ $t('links.protection.maxDownloadsHint') }}
+          </p>
+        </div>
+      </div>
+
       <BaseButton
         :title="$t('links.panel.createLink')"
         :label="$t('links.panel.createLink')"
         color="info"
         small
         data-testid="sharing-link-create"
-        :disabled="readOnly"
+        :disabled="readOnly || (protectWithPassword && !linkPassword)"
         @click.prevent="create"
       />
     </div>

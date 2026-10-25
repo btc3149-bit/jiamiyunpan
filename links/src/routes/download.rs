@@ -10,6 +10,7 @@ use error::{AppResult, Error};
 use fs::prelude::*;
 
 use crate::repository::Repository;
+use crate::routes::guard;
 
 /// Download file from a shareable link (raw ciphertext only).
 ///
@@ -17,6 +18,11 @@ use crate::repository::Repository;
 /// without performing any decryption. The caller (browser/app) must obtain
 /// the file key via the link metadata + link_key (from URL fragment) and
 /// decrypt client-side. This closes the last E2EE exception for public links.
+///
+/// Password-protected links additionally require a credential: the
+/// `X-Link-Password` header or the `link_pw` capability cookie minted by the
+/// unlock route (the wasm relay downloader cannot set headers, but always
+/// sends same-origin cookies). The password never travels in a URL.
 ///
 /// Request:
 ///  - Query: chunk: i64 - if omitted, every chunk is streamed back to back
@@ -38,6 +44,15 @@ pub(crate) async fn download(
         return Err(Error::Unauthorized("link_expired".to_string()));
     }
 
+    guard::authorize_password(&link, &req)?;
+
+    // Soft check with the freshly loaded row: refuse before streaming when
+    // the cap is already spent. The authoritative gate is the conditional
+    // increment below — this only spares the client a doomed transfer.
+    if link.is_download_exhausted() {
+        return Ok(guard::gone());
+    }
+
     let fs = Fs::new(&context.config);
 
     // Resolve the stream before touching the counter: a named-but-absent chunk
@@ -53,12 +68,17 @@ pub(crate) async fn download(
     // closes a download, and a whole-file request (`chunk` omitted) is a single
     // one. A preview or abandoned transfer that never reaches the last chunk
     // correctly does not count.
+    //
+    // The increment is conditional on `max_downloads` inside the SQL itself,
+    // so concurrent final chunks cannot push the counter past the cap: the
+    // loser of the race gets `false` here and the client gets a 410 instead
+    // of the final chunk.
     let last_chunk = link
         .file_size
         .map(|size| (size as u64).div_ceil(fs::MAX_CHUNK_SIZE_BYTES).max(1) - 1)
         .unwrap_or(0);
-    if chunk.is_none_or(|i| i as u64 == last_chunk) {
-        repository.increment_downloads(link.id).await?;
+    if chunk.is_none_or(|i| i as u64 == last_chunk) && !repository.try_increment_downloads(link.id).await? {
+        return Ok(guard::gone());
     }
 
     // The name lives in the link's encrypted metadata; the client decrypts it
@@ -89,6 +109,8 @@ pub(crate) async fn head(req: HttpRequest, context: web::Data<Context>) -> AppRe
     if link.is_expired() {
         return Err(Error::Unauthorized("link_expired".to_string()));
     }
+
+    guard::authorize_password(&link, &req)?;
 
     Ok(HttpResponse::NoContent()
         .insert_header(("Content-Type", link.file_mime))

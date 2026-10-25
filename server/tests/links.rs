@@ -124,6 +124,8 @@ async fn test_creating_and_downloading_link() {
         encrypted_thumbnail: None,
         encrypted_file_key: Some(file_key_hex_aes_enc_hex),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
     let req = test::TestRequest::post()
         .uri("/api/links")
@@ -272,6 +274,8 @@ async fn test_link_download_decrypts_aegis256_file() {
         encrypted_thumbnail: None,
         encrypted_file_key: Some(cryptfns::hex::encode(file_key_hex_enc)),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
     let req = test::TestRequest::post()
         .uri("/api/links")
@@ -420,6 +424,8 @@ async fn test_link_download_missing_chunk_returns_404() {
             cryptfns::aes::encrypt(link_key, b"file-key".to_vec()).unwrap(),
         )),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
     let req = test::TestRequest::post()
         .uri("/api/links")
@@ -544,6 +550,8 @@ async fn test_link_chunk_urls_refuse_an_expired_or_unknown_link() {
         )),
         // Already past — the route has to read the row before it decides.
         expires_at: Some(chrono::Utc::now().timestamp() - 60),
+        password: None,
+        max_downloads: None,
     };
     let req = test::TestRequest::post()
         .uri("/api/links")
@@ -666,6 +674,8 @@ async fn test_link_chunk_urls_refuse_when_the_provider_has_no_urls() {
             cryptfns::aes::encrypt(link_key, b"file-key".to_vec()).unwrap(),
         )),
         expires_at: None,
+        password: None,
+        max_downloads: None,
     };
     let req = test::TestRequest::post()
         .uri("/api/links")
@@ -680,6 +690,331 @@ async fn test_link_chunk_urls_refuse_when_the_provider_has_no_urls() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Same shape as the shares suites' `TestApp`: one trait to name "the thing
+/// `test::init_service` returns" without spelling out its concrete type.
+trait LinksTestApp:
+    actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse<Self::Body>,
+        Error = actix_web::Error,
+    >
+{
+    type Body: actix_web::body::MessageBody;
+}
+
+impl<S, B> LinksTestApp for S
+where
+    B: actix_web::body::MessageBody,
+    S: actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse<B>,
+        Error = actix_web::Error,
+    >,
+{
+    type Body = B;
+}
+
+/// Shared setup for the password-protection tests: one legacy-RSA owner, one
+/// single-chunk file, one public link with the requested protection fields.
+async fn seed_protected_link(
+    context: &context::Context,
+    app: &impl LinksTestApp,
+    email: &str,
+    password: Option<&str>,
+    max_downloads: Option<i32>,
+) -> (actix_web::cookie::Cookie<'static>, AppLink, storage::data::app_file::AppFile) {
+    use storage::data::create_file::CreateFile;
+
+    let owner = helpers::seed_legacy_user(&context.db, email).await;
+    let req = test::TestRequest::post()
+        .uri("/api/auth/login")
+        .set_json(json!({ "email": email, "password": helpers::LEGACY_PASSWORD }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let (jwt, _) = helpers::extract_cookies(resp.headers());
+    let jwt = jwt.unwrap();
+
+    let create_file = CreateFile {
+        encrypted_key: Some("encrypted-gibberish".to_string()),
+        encrypted_name: Some("name".to_string()),
+        encrypted_thumbnail: None,
+        search_tokens_root: None,
+        search_tokens_file: None,
+        content_tokens_root: None,
+        content_tokens_file: None,
+        name_hash: Some(helpers::name_tag(email)),
+        mime: Some("text/plain".to_string()),
+        size: Some(8),
+        chunks: Some(1),
+        file_id: None,
+        file_modified_at: None,
+        md5: None,
+        sha1: None,
+        sha256: None,
+        blake2b: None,
+        digest_tokens_root: None,
+        digest_tokens_file: None,
+        cipher: None,
+        editable: None,
+    };
+    let req = test::TestRequest::post()
+        .uri("/api/storage")
+        .cookie(jwt.clone())
+        .set_json(&create_file)
+        .to_request();
+    let file: AppFile =
+        serde_json::from_slice(&test::call_and_read_body(app, req).await).unwrap();
+
+    let payload = b"ciphertxt".to_vec();
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/storage/{}?checksum={}&chunk=0",
+            file.id,
+            cryptfns::sha256::digest(payload.as_slice())
+        ))
+        .cookie(jwt.clone())
+        .append_header(("Content-Type", "application/octet-stream"))
+        .set_payload(payload)
+        .to_request();
+    test::call_service(app, req).await;
+
+    let link_key = cryptfns::aes::generate_key().unwrap();
+    let link_key_hex = cryptfns::hex::encode(link_key.clone());
+    let create_link = links::data::create_link::CreateLink {
+        file_id: Some(file.id.to_string()),
+        signature: Some(
+            cryptfns::rsa::private::sign(file.id.to_string().as_str(), &owner.rsa_private).unwrap(),
+        ),
+        encrypted_name: Some(cryptfns::hex::encode(
+            cryptfns::aes::encrypt(link_key.clone(), b"secret.txt".to_vec()).unwrap(),
+        )),
+        encrypted_link_key: Some(
+            cryptfns::rsa::public::encrypt(&link_key_hex, &owner.rsa_public).unwrap(),
+        ),
+        encrypted_thumbnail: None,
+        encrypted_file_key: Some(cryptfns::hex::encode(
+            cryptfns::aes::encrypt(link_key, b"file-key".to_vec()).unwrap(),
+        )),
+        expires_at: None,
+        password: password.map(|p| p.to_string()),
+        max_downloads,
+    };
+    let req = test::TestRequest::post()
+        .uri("/api/links")
+        .cookie(jwt.clone())
+        .set_json(create_link)
+        .to_request();
+    let link: AppLink =
+        serde_json::from_slice(&test::call_and_read_body(app, req).await).unwrap();
+
+    (jwt, link, file)
+}
+
+/// A password-protected link refuses every anonymous download path until the
+/// recipient proves knowledge of the password — via the unlock route (which
+/// mints a scoped capability cookie) or directly via the password header.
+#[actix_web::test]
+async fn test_password_protected_link_requires_the_password() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-links-pw".to_string()))
+        .await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let (_jwt, link, file) = seed_protected_link(
+        &context,
+        &app,
+        "pw-link@doe.com",
+        Some("sesame-42"),
+        None,
+    )
+    .await;
+
+    assert!(
+        link.has_password,
+        "the created link must advertise its password protection"
+    );
+
+    // Metadata stays open (it is all ciphertext) and says has_password.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/links/{}/metadata", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    let meta: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(meta["has_password"], json!(true));
+    assert!(meta.get("password_hash").is_none(), "the hash must never be serialized");
+
+    // Anonymous download and HEAD are refused.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["message"], json!("link_password_required"));
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}?chunk=0", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+    let req = test::TestRequest::default()
+        .method(actix_web::http::Method::HEAD)
+        .uri(&format!("/api/links/{}", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+    // The wrong password is refused, on both transports.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}", link.id))
+        .append_header(("X-Link-Password", "wrong"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["message"], json!("invalid_link_password"));
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}/unlock", link.id))
+        .set_json(json!({ "password": "wrong" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+    // Unlocking mints the capability cookie.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}/unlock", link.id))
+        .set_json(json!({ "password": "sesame-42" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::NO_CONTENT);
+    let cookie_header = resp
+        .headers()
+        .get("Set-Cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        cookie_header.starts_with("link_pw=") && cookie_header.contains("HttpOnly"),
+        "unlock must set the scoped capability cookie, got: {cookie_header}"
+    );
+    let cookie = cookie_header
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // The cookie alone now opens the download.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}", link.id))
+        .append_header(("Cookie", cookie.as_str()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+    // And so does the header, without any unlock round-trip.
+    let req = test::TestRequest::default()
+        .method(actix_web::http::Method::HEAD)
+        .uri(&format!("/api/links/{}", link.id))
+        .append_header(("X-Link-Password", "sesame-42"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::NO_CONTENT);
+
+    // The counter moved exactly once: the cookie download was a completed
+    // whole-file transfer, the 401s never counted.
+    use entity::EntityTrait;
+    let downloads = entity::links::Entity::find_by_id(link.id)
+        .one(&context.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .downloads;
+    assert_eq!(downloads, 1);
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// `max_downloads` is enforced atomically at the counter: the first completed
+/// download spends the cap, and every later request gets 410 Gone instead of
+/// bytes — the link was once valid and is now permanently spent.
+#[actix_web::test]
+async fn test_link_download_limit_returns_410_once_spent() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-links-cap".to_string()))
+        .await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let (_jwt, link, file) =
+        seed_protected_link(&context, &app, "cap-link@doe.com", None, Some(1)).await;
+
+    // First download goes through and consumes the cap.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+    // Second download: 410 with the shared error shape, no bytes.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}?chunk=0", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GONE);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["message"], json!("link_download_limit_reached"));
+
+    // The counter never overshoots the cap.
+    use entity::EntityTrait;
+    let row = entity::links::Entity::find_by_id(link.id)
+        .one(&context.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.downloads, 1);
+    assert_eq!(row.max_downloads, Some(1));
+
+    use fs::prelude::{Fs, FsProviderContract};
+    Fs::new(&context.config).purge_all(&file).await.unwrap();
+    context.config.app.cleanup();
+}
+
+/// Unlocking a link that has no password is a client bug, not a security
+/// event — it gets a plain 400.
+#[actix_web::test]
+async fn test_unlock_on_unprotected_link_is_rejected() {
+    let context = context::Context::mock_with_data_dir(Some("../data/test-links-unlock".to_string()))
+        .await;
+    let app = test::init_service(server::app(context.clone())).await;
+
+    let (_jwt, link, file) =
+        seed_protected_link(&context, &app, "open-link@doe.com", None, None).await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}/unlock", link.id))
+        .set_json(json!({ "password": "anything" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+
+    // And the link itself keeps working for anyone, as before.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/links/{}", link.id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        actix_web::http::StatusCode::OK,
+        "a link without a password must not start requiring one"
+    );
 
     use fs::prelude::{Fs, FsProviderContract};
     Fs::new(&context.config).purge_all(&file).await.unwrap();

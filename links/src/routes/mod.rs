@@ -1,9 +1,11 @@
 pub mod chunk_urls;
+pub(crate) mod guard;
 pub mod create;
 pub mod delete;
 pub mod download;
 pub mod index;
 pub mod metadata;
+pub mod unlock;
 pub mod update;
 
 /// Register the links routes
@@ -16,5 +18,6 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
     cfg.service(metadata::metadata);
     cfg.service(download::head);
     cfg.service(index::index);
+    cfg.service(unlock::unlock);
     cfg.service(update::update);
 }

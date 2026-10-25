@@ -6,7 +6,7 @@ import * as logger from '!/logger'
 import * as meta from './meta'
 import * as crypto from './crypto'
 import * as thumbnailCache from '!/storage/thumbnail-cache'
-import type { AppLink, CreateLink, EncryptedAppLink, KeyPair, AppFile } from 'types'
+import type { AppLink, CreateLink, EncryptedAppLink, KeyPair, AppFile, UpdateLinkProtection } from 'types'
 
 export { meta, crypto }
 
@@ -106,8 +106,12 @@ export const store = defineStore('links', () => {
   /**
    * Share a link with a publicly accessible link.
    */
-  async function create(link: AppFile, kp: KeyPair): Promise<AppLink> {
-    const createLink = await meta.createLinkFromFile(link, kp)
+  async function create(
+    link: AppFile,
+    kp: KeyPair,
+    protection?: { password?: string; max_downloads?: number }
+  ): Promise<AppLink> {
+    const createLink = await meta.createLinkFromFile(link, kp, protection)
 
     const response = await Api.post<CreateLink, EncryptedAppLink>(
       '/api/links',
@@ -143,6 +147,45 @@ export const store = defineStore('links', () => {
     )
 
     selected.value = []
+  }
+
+  /**
+   * Update the owner-side protection of a link: password and/or download
+   * cap. Omitted fields keep their current server value.
+   */
+  async function updateProtection(
+    id: string,
+    protection: UpdateLinkProtection
+  ): Promise<AppLink> {
+    const link = getItem(id)
+
+    if (!link) {
+      throw new Error('Failed to update link')
+    }
+
+    // The PUT always applies `expires_at` — there is no "absent" on the
+    // wire — so echo the stored value back or a protection-only edit would
+    // silently clear the link's expiry.
+    await Api.put(`/api/links/${id}`, undefined, {
+      expires_at: link.expires_at,
+      ...protection
+    })
+
+    // The server answer is encrypted metadata; refresh through the same
+    // decrypt path the owner listing uses so `has_password` is authoritative.
+    const decrypted = await meta.metadata(id, link.link_key_hex!)
+    upsertItem(decrypted)
+    return decrypted
+  }
+
+  /**
+   * Exchange the link password for a scoped capability cookie. After a
+   * successful unlock every gated link request (download, chunk manifest)
+   * carries the proof automatically — including the ones built inside the
+   * wasm transfer downloader, which cannot set custom headers.
+   */
+  async function unlock(id: string, password: string): Promise<void> {
+    await Api.post(`/api/links/${id}/unlock`, undefined, { password })
   }
 
   /**
@@ -314,7 +357,9 @@ export const store = defineStore('links', () => {
     removeItem,
     selectAll,
     selectOne,
+    unlock,
     updateItem,
+    updateProtection,
     upsertItem,
     deselectAll,
     selected,

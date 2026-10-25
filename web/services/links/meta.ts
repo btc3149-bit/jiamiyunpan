@@ -179,7 +179,11 @@ export async function encryptedMetadata(id: string): Promise<EncryptedAppLink> {
 /**
  * Convert unencrypted app file into a encrypted create link construct
  */
-export async function createLinkFromFile(file: AppFile, kp: KeyPair): Promise<CreateLink> {
+export async function createLinkFromFile(
+  file: AppFile,
+  kp: KeyPair,
+  protection?: { password?: string; max_downloads?: number }
+): Promise<CreateLink> {
   if (!file.key) {
     throw new Error('File key is missing')
   }
@@ -227,6 +231,12 @@ export async function createLinkFromFile(file: AppFile, kp: KeyPair): Promise<Cr
     encrypted_link_key,
     encrypted_name,
     encrypted_file_key,
-    encrypted_thumbnail
+    encrypted_thumbnail,
+    // The server hashes the plaintext and never echoes it back; an empty
+    // string means "no password", not a lock on the empty string.
+    password: protection?.password || undefined,
+    max_downloads: protection?.max_downloads && protection.max_downloads > 0
+      ? protection.max_downloads
+      : undefined
   }
 }

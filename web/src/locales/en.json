@@ -739,7 +739,32 @@
     },
     "view": {
       "hasExpired": "This link has expired on {date}",
-      "willExpire": "This link will expire on {date}"
+      "willExpire": "This link will expire on {date}",
+      "passwordTitle": "Password Required",
+      "passwordDescription": "This link is protected with a download password. Enter it below to view and download the file.",
+      "passwordLabel": "Download password",
+      "passwordSubmit": "Unlock",
+      "passwordError": "Wrong password. Please try again.",
+      "limitReached": "This link has reached its download limit and can no longer be downloaded."
+    },
+    "protection": {
+      "title": "Link protection",
+      "passwordToggle": "Protect with a password",
+      "passwordPlaceholder": "Download password",
+      "passwordReplacePlaceholder": "New password (replaces the current one)",
+      "passwordKeptHint": "Leave empty to keep the current password.",
+      "passwordEnabledNotice": "Password protection is enabled — share the password with recipients separately.",
+      "passwordRemovedNotice": "Password protection removed — anyone with the link can download again.",
+      "passwordRequired": "Download password is required",
+      "maxDownloadsLabel": "Download limit",
+      "maxDownloadsPlaceholder": "Unlimited",
+      "maxDownloadsHint": "Maximum number of completed downloads; leave empty for unlimited.",
+      "maxDownloadsValue": "Limit: {count}",
+      "downloadsWithLimit": "{done} / {max}",
+      "statusProtected": "Password protected",
+      "statusUnprotected": "No password",
+      "editProtection": "Edit protection",
+      "saveProtection": "Save protection"
     }
   },
   "nav": {
@@ -909,7 +934,17 @@
     },
     "zoomFit": "Fit image to screen",
     "zoomIn": "Increase image size",
-    "zoomOut": "Decrease image size"
+    "zoomOut": "Decrease image size",
+    "text": {
+      "truncated": "Preview truncated — file exceeds the size limit. Download it to view the full content."
+    },
+    "audio": {
+      "loading": "Loading audio… {progress}",
+      "loadError": "Audio failed to load: {error}"
+    },
+    "docx": {
+      "loadError": "Document failed to load: {error}"
+    }
   },
   "reindex": {
     "background": "Continue in background",

@@ -739,7 +739,32 @@
     },
     "view": {
       "hasExpired": "Dieser Link ist am {date} abgelaufen",
-      "willExpire": "Dieser Link läuft am {date} ab"
+      "willExpire": "Dieser Link läuft am {date} ab",
+      "passwordTitle": "Passwort erforderlich",
+      "passwordDescription": "Dieser Link ist mit einem Download-Passwort geschützt. Geben Sie es unten ein, um die Datei anzuzeigen und herunterzuladen.",
+      "passwordLabel": "Download-Passwort",
+      "passwordSubmit": "Entsperren",
+      "passwordError": "Falsches Passwort. Bitte versuchen Sie es erneut.",
+      "limitReached": "Dieser Link hat sein Download-Limit erreicht und kann nicht mehr heruntergeladen werden."
+    },
+    "protection": {
+      "title": "Link-Schutz",
+      "passwordToggle": "Mit Passwort schützen",
+      "passwordPlaceholder": "Download-Passwort",
+      "passwordReplacePlaceholder": "Neues Passwort (ersetzt das aktuelle)",
+      "passwordKeptHint": "Leer lassen, um das aktuelle Passwort zu behalten.",
+      "passwordEnabledNotice": "Passwortschutz ist aktiviert — teilen Sie das Passwort den Empfängern separat mit.",
+      "passwordRemovedNotice": "Passwortschutz entfernt — jeder mit dem Link kann wieder herunterladen.",
+      "passwordRequired": "Download-Passwort ist erforderlich",
+      "maxDownloadsLabel": "Download-Limit",
+      "maxDownloadsPlaceholder": "Unbegrenzt",
+      "maxDownloadsHint": "Maximale Anzahl abgeschlossener Downloads; leer lassen für unbegrenzt.",
+      "maxDownloadsValue": "Limit: {count}",
+      "downloadsWithLimit": "{done} / {max}",
+      "statusProtected": "Passwortgeschützt",
+      "statusUnprotected": "Kein Passwort",
+      "editProtection": "Schutz bearbeiten",
+      "saveProtection": "Schutz speichern"
     }
   },
   "nav": {
@@ -909,7 +934,17 @@
     },
     "zoomFit": "Bild einpassen",
     "zoomIn": "Bild vergrößern",
-    "zoomOut": "Bild verkleinern"
+    "zoomOut": "Bild verkleinern",
+    "text": {
+      "truncated": "Vorschau gekürzt — Datei überschreitet die Größenbeschränkung. Lade sie herunter, um den vollständigen Inhalt zu sehen."
+    },
+    "audio": {
+      "loading": "Audio wird geladen… {progress}",
+      "loadError": "Audio konnte nicht geladen werden: {error}"
+    },
+    "docx": {
+      "loadError": "Dokument konnte nicht geladen werden: {error}"
+    }
   },
   "reindex": {
     "background": "Im Hintergrund fortsetzen",

@@ -23,6 +23,17 @@ pub struct AppLink {
     /// this counts every attempt to download the file,
     /// it doesn't wait for the file to be downloaded in order to increment.
     pub downloads: i32,
+    /// Whether the link requires a download password. The hash itself never
+    /// reaches clients — see `password_hash` below.
+    pub has_password: bool,
+    /// Bcrypt hash of the shared-link download password. Skipped during
+    /// serialization; used server-side for verification and for minting the
+    /// scoped capability cookie after a successful unlock.
+    #[serde(skip_serializing)]
+    pub password_hash: Option<String>,
+    /// Optional cap on completed downloads, as set by the owner. `None` =
+    /// unlimited.
+    pub max_downloads: Option<i32>,
     /// Name of the file encrypted with the link key. If the file is
     /// renamed after the link is created, that change won't be reflected
     /// in the link.
@@ -74,6 +85,27 @@ impl AppLink {
             .map(|expires_at| expires_at < now)
             .unwrap_or(false)
     }
+
+    /// Whether the download cap (if any) has already been reached. This is a
+    /// read-time check; the authoritative gate is the atomic conditional
+    /// increment in `Repository::try_increment_downloads`, which closes the
+    /// race this soft check leaves open.
+    pub fn is_download_exhausted(&self) -> bool {
+        self.max_downloads
+            .map(|max| self.downloads >= max)
+            .unwrap_or(false)
+    }
+
+    /// The capability-cookie value that proves this client unlocked the
+    /// link: `{link_id}:{password_hash}`. The server mints it only after a
+    /// successful bcrypt verification and matches it verbatim afterwards,
+    /// so possession of the cookie is equivalent to possession of the
+    /// password — for this one link, inside the cookie's path scope.
+    pub fn password_cookie_value(&self) -> Option<String> {
+        self.password_hash
+            .as_ref()
+            .map(|hash| format!("{}:{}", self.id, hash))
+    }
 }
 
 impl FromQueryResult for AppLink {
@@ -89,6 +121,9 @@ impl FromQueryResult for AppLink {
             file_mime: file.mime,
             signature: link.signature,
             downloads: link.downloads,
+            has_password: link.password_hash.is_some(),
+            password_hash: link.password_hash,
+            max_downloads: link.max_downloads,
             encrypted_name: link.encrypted_name,
             encrypted_link_key: link.encrypted_link_key,
             // Computed in SQL by the listing selector; the fallback covers
