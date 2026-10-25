@@ -72,6 +72,11 @@ impl AuthProvider for CredentialsProvider<'_> {
             return Err(Error::Unauthorized("inactive_account".to_string()));
         }
 
+        // A disabled account is not allowed in even with valid credentials.
+        if user.disabled_at.is_some() {
+            return Err(Error::Forbidden("account_disabled".to_string()));
+        }
+
         let session = self.auth.generate(&user, user_agent, ip).await?;
 
         Ok(Authenticated { user, session })

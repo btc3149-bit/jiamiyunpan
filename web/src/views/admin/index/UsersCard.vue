@@ -4,17 +4,25 @@ import CardBoxComponentHeader from '@/components/ui/CardBoxComponentHeader.vue'
 import SortableName from '@/components/ui/SortableName.vue'
 import PuppyLoader from '@/components/ui/PuppyLoader.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseButtons from '@/components/ui/BaseButtons.vue'
 import BaseIcon from '@/components/ui/BaseIcon.vue'
+import TableCheckboxCell from '@/components/ui/TableCheckboxCell.vue'
+import CardBoxModal from '@/components/ui/CardBoxModal.vue'
 import UserRow from './UserRow.vue'
 import { index } from '!/admin/users'
+import { usersBulk } from '!/admin/bulk'
+import { notification, errorNotification } from '!/notify'
 import { computed, ref, watch } from 'vue'
-import type { Search, User } from 'types/admin/users'
-import { mdiSearchWeb } from '@mdi/js'
+import { useI18n } from 'vue-i18n'
+import type { Search, User, BulkAction } from 'types/admin/users'
+import { mdiAccountCheck, mdiAccountOff, mdiDelete, mdiSearchWeb } from '@mdi/js'
 import type { Paginated } from 'types'
 
 const props = defineProps<{
   class?: string
 }>()
+
+const { t } = useI18n()
 
 const paginated = ref<Paginated<User>>()
 const query = ref<Search>({
@@ -59,6 +67,96 @@ const find = async () => {
 }
 
 watch(query, find, { deep: true, immediate: true })
+
+// Selection lives as an array of user ids from the current page.
+const selectedIds = ref<string[]>([])
+const bulkRunning = ref(false)
+
+const allSelected = computed(() => {
+  if (!paginated.value || paginated.value.data.length === 0) return false
+  return paginated.value.data.every((user) => selectedIds.value.includes(user.id))
+})
+
+const toggleAll = (value: boolean) => {
+  if (!paginated.value) return
+  selectedIds.value = value ? paginated.value.data.map((user) => user.id) : []
+}
+
+const toggleRow = (id: string, value: boolean) => {
+  if (value) {
+    if (!selectedIds.value.includes(id)) selectedIds.value = [...selectedIds.value, id]
+  } else {
+    selectedIds.value = selectedIds.value.filter((selected) => selected !== id)
+  }
+}
+
+// Drop ids that left the page (pagination, deletion, search change).
+watch(
+  () => paginated.value?.data.map((user) => user.id).join(','),
+  () => {
+    if (!paginated.value) return
+    const live = new Set(paginated.value.data.map((user) => user.id))
+    selectedIds.value = selectedIds.value.filter((id) => live.has(id))
+  }
+)
+
+// Bulk action bar + confirm modal state.
+const pendingAction = ref<BulkAction>()
+const confirmOpen = ref(false)
+
+const actionLabel = computed(() => {
+  switch (pendingAction.value) {
+    case 'disable':
+      return t('admin.users.actionDisable')
+    case 'enable':
+      return t('admin.users.actionEnable')
+    case 'delete':
+      return t('admin.users.actionDelete')
+    default:
+      return ''
+  }
+})
+
+const openBulk = (action: BulkAction) => {
+  if (selectedIds.value.length === 0 || bulkRunning.value) return
+  pendingAction.value = action
+  confirmOpen.value = true
+}
+
+const runBulk = async () => {
+  if (!pendingAction.value || bulkRunning.value) return
+  bulkRunning.value = true
+
+  try {
+    const action = pendingAction.value
+    const response = await usersBulk(action, selectedIds.value)
+    const failed = response.results.filter((result) => !result.ok)
+    const succeeded = response.results.length - failed.length
+
+    if (failed.length === 0) {
+      notification(
+        t('admin.users.bulkDone'),
+        t('admin.users.bulkSummary', { success: succeeded, failed: 0 }),
+        'success'
+      )
+    } else {
+      const ids = failed.map((result) => `${result.id}: ${result.error}`).join(', ')
+      notification(
+        t('admin.users.bulkFailed'),
+        `${t('admin.users.bulkSummary', { success: succeeded, failed: failed.length })} — ${ids}`,
+        'error'
+      )
+    }
+
+    selectedIds.value = []
+    confirmOpen.value = false
+    await find()
+  } catch (error) {
+    errorNotification(error)
+  } finally {
+    bulkRunning.value = false
+  }
+}
 </script>
 <template>
   <div class="flex" :class="props.class">
@@ -85,10 +183,51 @@ watch(query, find, { deep: true, immediate: true })
         </div>
       </CardBoxComponentHeader>
 
+      <!-- Bulk action bar: appears when rows are selected -->
+      <div
+        v-if="selectedIds.length > 0"
+        class="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-paper-200 dark:border-brownish-700/50 bg-paper-50 dark:bg-brownish-800/40"
+      >
+        <span class="text-sm font-medium">
+          {{ $t('admin.users.selectedCount', { count: selectedIds.length }) }}
+        </span>
+        <BaseButtons>
+          <BaseButton
+            :icon="mdiAccountOff"
+            :small="true"
+            :label="$t('admin.users.bulkDisable')"
+            :disabled="bulkRunning"
+            @click="openBulk('disable')"
+          />
+          <BaseButton
+            :icon="mdiAccountCheck"
+            :small="true"
+            :label="$t('admin.users.bulkEnable')"
+            :disabled="bulkRunning"
+            @click="openBulk('enable')"
+          />
+          <BaseButton
+            :icon="mdiDelete"
+            :small="true"
+            color="danger"
+            :label="$t('admin.users.bulkDelete')"
+            :disabled="bulkRunning"
+            @click="openBulk('delete')"
+          />
+        </BaseButtons>
+      </div>
+
       <div class="overflow-x-auto -mx-4 -mb-4" v-if="paginated">
         <table class="w-full">
           <thead>
             <tr>
+              <th class="lg:w-1">
+                <TableCheckboxCell
+                  :model-value="allSelected"
+                  :label="$t('common.selectAll')"
+                  @update:model-value="toggleAll"
+                />
+              </th>
               <th><SortableName :label="$t('common.email')" name="email" v-model="query" /></th>
               <th>{{ $t('admin.users.tfa') }}</th>
               <th>{{ $t('admin.role') }}</th>
@@ -99,7 +238,13 @@ watch(query, find, { deep: true, immediate: true })
             </tr>
           </thead>
           <tbody>
-            <UserRow :user="user" v-for="user in paginated.data" :key="user.id" />
+            <UserRow
+              :user="user"
+              :selected="selectedIds.includes(user.id)"
+              @update:selected="toggleRow(user.id, $event)"
+              v-for="user in paginated.data"
+              :key="user.id"
+            />
           </tbody>
         </table>
 
@@ -111,5 +256,20 @@ watch(query, find, { deep: true, immediate: true })
       </div>
       <PuppyLoader v-else />
     </CardBox>
+
+    <!-- Bulk confirmation -->
+    <CardBoxModal
+      v-model="confirmOpen"
+      :title="$t('admin.users.bulkConfirmTitle')"
+      :button="pendingAction === 'delete' ? 'danger' : 'info'"
+      :button-label="$t('common.confirm')"
+      :has-cancel="true"
+      :confirm-disabled="bulkRunning"
+      @confirm="runBulk"
+    >
+      <p>
+        {{ $t('admin.users.bulkConfirmText', { action: actionLabel, count: selectedIds.length }) }}
+      </p>
+    </CardBoxModal>
   </div>
 </template>

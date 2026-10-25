@@ -245,9 +245,31 @@
       "tfaEnabled": "aktiviert",
       "tfaOff": "aus",
       "title": "Benutzer ({total})",
-      "unverified": "nicht verifiziert"
+      "unverified": "nicht verifiziert",
+      "actionDelete": "Löschen",
+      "actionDisable": "Deaktivieren",
+      "actionEnable": "Aktivieren",
+      "bulkConfirmTitle": "Sammelaktion bestätigen",
+      "bulkConfirmText": "„{action}\" auf {count} ausgewählte Benutzer anwenden? Löschen kann nicht rückgängig gemacht werden.",
+      "bulkDelete": "Ausgewählte löschen",
+      "bulkDisable": "Ausgewählte deaktivieren",
+      "bulkEnable": "Ausgewählte aktivieren",
+      "bulkDone": "Sammelaktion abgeschlossen",
+      "bulkFailed": "Sammelaktion teilweise fehlgeschlagen",
+      "bulkSummary": "{success} erfolgreich, {failed} fehlgeschlagen",
+      "disabled": "Deaktiviert",
+      "selectedCount": "{count} ausgewählt"
     },
-    "withExpired": "Mit abgelaufenen"
+    "withExpired": "Mit abgelaufenen",
+    "audit": {
+      "title": "Audit-Protokoll ({total})",
+      "actionFilterPlaceholder": "Nach Aktion filtern (z. B. login)",
+      "time": "Zeit",
+      "user": "Benutzer",
+      "action": "Aktion",
+      "target": "Ziel",
+      "empty": "Keine Audit-Einträge"
+    }
   },
   "auth": {
     "alreadyHaveAccount": "Sie haben bereits ein Konto?",
@@ -827,7 +849,8 @@
       "registerResend": "Konto erstellen – Aktivierungs-E-Mail erneut senden",
       "registerTwoFactor": "Konto erstellen – Zwei-Faktor-Authentifizierung",
       "setupLockScreen": "Sperrbildschirm einrichten",
-      "verifyEmail": "Konto erstellen – E-Mail verifizieren"
+      "verifyEmail": "Konto erstellen – E-Mail verifizieren",
+      "manageAudit": "Audit verwalten"
     },
     "upload": {
       "fileIsDirectory": "Datei {name} ist ein Ordner"

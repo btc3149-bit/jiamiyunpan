@@ -29,6 +29,8 @@ pub struct Model {
     pub opaque_password_file: Option<String>,
     pub encrypted_private_key: Option<String>,
     pub email_verified_at: Option<i64>,
+    /// Timestamp of when an admin disabled the account, `None` while active.
+    pub disabled_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub share_notifications_enabled: bool,
@@ -85,6 +87,7 @@ mod test {
             opaque_password_file: None,
             encrypted_private_key: None,
             email_verified_at: None,
+            disabled_at: None,
             created_at: 0,
             updated_at: 0,
             share_notifications_enabled: true,

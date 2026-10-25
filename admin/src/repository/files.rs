@@ -5,7 +5,7 @@ use entity::{
     files, user_files, ColumnTrait, ConnectionTrait, EntityTrait, Expr, IntoCondition, JoinType,
     QueryFilter, QuerySelect, RelationTrait, Uuid,
 };
-use error::AppResult;
+use error::{AppResult, Error};
 use fs::prelude::*;
 
 pub(crate) struct FilesRepository<'repository, T: ConnectionTrait> {
@@ -96,6 +96,20 @@ where
             .exec(self.repository.connection())
             .await?
             .rows_affected)
+    }
+
+    /// Delete a single file by id, purging its storage data. Fails with
+    /// `file_not_found` when the id does not exist so bulk callers can
+    /// report a per-id error.
+    pub(crate) async fn delete_one(&self, file_id: Uuid) -> AppResult<()> {
+        let file = files::Entity::find_by_id(file_id)
+            .one(self.repository.connection())
+            .await?
+            .ok_or_else(|| Error::NotFound("file_not_found".to_string()))?;
+
+        self.delete_many(vec![file]).await?;
+
+        Ok(())
     }
 
     /// Get the available space on the storage provider. When an instance-wide

@@ -16,6 +16,7 @@ export interface User {
   pubkey: string
   fingerprint: string
   email_verified_at?: number
+  disabled_at?: number
   created_at: number
   updated_at: number
   last_session?: Session
@@ -32,4 +33,21 @@ export interface Search extends Query {
   order?: 'asc' | 'desc'
   limit?: number
   offset?: number
+}
+
+export type BulkAction = 'disable' | 'enable' | 'delete'
+
+export interface BulkRequest {
+  action: BulkAction
+  ids: string[]
+}
+
+export interface BulkResultItem {
+  id: string
+  ok: boolean
+  error?: string
+}
+
+export interface BulkResponse {
+  results: BulkResultItem[]
 }

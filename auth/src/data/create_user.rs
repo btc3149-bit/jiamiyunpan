@@ -155,6 +155,7 @@ impl CreateUser {
             opaque_password_file: ActiveValue::NotSet,
             encrypted_private_key: ActiveValue::Set(data.encrypted_private_key),
             email_verified_at: ActiveValue::Set(None),
+            disabled_at: ActiveValue::Set(None),
             created_at: ActiveValue::Set(Utc::now().timestamp()),
             updated_at: ActiveValue::Set(Utc::now().timestamp()),
             share_notifications_enabled: ActiveValue::Set(true),

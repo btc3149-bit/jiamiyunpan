@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { formatPrettyDate } from '!/index'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import TableCheckboxCell from '@/components/ui/TableCheckboxCell.vue'
 import type { User } from 'types/admin/users'
 import { computed } from 'vue'
 import { mdiPencil } from '@mdi/js'
 
 const props = defineProps<{
   user: User
+  selected: boolean
+}>()
+
+const emit = defineEmits<{
+  (event: 'update:selected', value: boolean): void
 }>()
 
 const createdAt = computed(() => formatPrettyDate(props.user.created_at))
@@ -20,10 +26,25 @@ const lastActiveAt = computed(() => {
   if (!props.user.last_session) return null
   return formatPrettyDate(props.user.last_session.updated_at)
 })
+
+const disabled = computed(() => !!props.user.disabled_at)
 </script>
 <template>
   <tr>
-    <td :data-label="$t('common.email')">{{ user.email }}</td>
+    <td class="lg:w-1">
+      <TableCheckboxCell
+        :model-value="selected"
+        :label="$t('common.selectRow', { name: user.email })"
+        @update:model-value="emit('update:selected', $event)"
+      />
+    </td>
+    <td :data-label="$t('common.email')">
+      {{ user.email }}
+      <span
+        v-if="disabled"
+        class="ml-2 inline-flex items-center text-xs font-semibold text-redish-500 dark:text-redish-100"
+      >{{ $t('admin.users.disabled') }}</span>
+    </td>
     <td :data-label="$t('admin.users.tfa')">
       <span v-if="user.secret" class="text-greeny-500 dark:text-greeny-300">{{ $t('admin.users.tfaEnabled') }}</span>
       <span v-else class="text-brownish-400 dark:text-brownish-50">{{ $t('admin.users.tfaOff') }}</span>

@@ -1,3 +1,4 @@
+pub mod audit_log;
 pub mod file_tokens;
 pub mod file_versions;
 pub mod files;

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use actix_web::{route, web, HttpResponse};
+use actix_web::{route, web, HttpRequest, HttpResponse};
 use auth::data::staff::Staff;
 use context::Context;
 use cryptfns::cipher::Cipher;
@@ -14,6 +14,7 @@ use settings::factory::Factory;
 /// Response: [settings::data::Data]
 #[route("/api/admin/settings", method = "PUT")]
 pub(crate) async fn update(
+    req: HttpRequest,
     staff: Staff,
     context: web::Data<Context>,
     data: web::Json<settings::data::Data>,
@@ -25,10 +26,23 @@ pub(crate) async fn update(
         return Err(Error::as_validation("sharing.default_cipher", "unknown_cipher"));
     }
 
+    let (user_agent, ip) = util::actix::extract_ip_ua(&req);
+
     context
         .settings
         .update(&context.config, data.into_inner())
         .await?;
+
+    entity::audit_log::record(
+        &context.db,
+        Some(staff.claims.sub),
+        "admin.settings.update",
+        Some("settings".to_string()),
+        Some(ip),
+        Some(user_agent),
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::Ok().json(context.settings.inner().await.clone()))
 }

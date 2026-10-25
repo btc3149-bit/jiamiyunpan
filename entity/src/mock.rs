@@ -33,6 +33,7 @@ pub async fn create_user<T: super::ConnectionTrait>(
         updated_at: ActiveValue::Set(Utc::now().timestamp()),
         share_notifications_enabled: ActiveValue::Set(true),
         locale: ActiveValue::NotSet,
+        disabled_at: ActiveValue::NotSet,
     };
 
     crate::users::Entity::insert(user)

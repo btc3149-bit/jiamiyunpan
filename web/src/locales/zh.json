@@ -245,9 +245,31 @@
       "tfaEnabled": "已启用",
       "tfaOff": "未启用",
       "title": "用户（{total}）",
-      "unverified": "未验证"
+      "unverified": "未验证",
+      "actionDelete": "删除",
+      "actionDisable": "禁用",
+      "actionEnable": "启用",
+      "bulkConfirmTitle": "确认批量操作",
+      "bulkConfirmText": "对选中的 {count} 个用户执行“{action}”？删除操作无法撤销。",
+      "bulkDelete": "删除所选",
+      "bulkDisable": "禁用所选",
+      "bulkEnable": "启用所选",
+      "bulkDone": "批量操作完成",
+      "bulkFailed": "批量操作部分失败",
+      "bulkSummary": "成功 {success} 个，失败 {failed} 个",
+      "disabled": "已禁用",
+      "selectedCount": "已选 {count} 项"
     },
-    "withExpired": "含已过期"
+    "withExpired": "含已过期",
+    "audit": {
+      "title": "审计日志（共 {total} 条）",
+      "actionFilterPlaceholder": "按操作过滤（如 login）",
+      "time": "时间",
+      "user": "用户",
+      "action": "操作",
+      "target": "目标",
+      "empty": "暂无审计记录"
+    }
   },
   "auth": {
     "alreadyHaveAccount": "已经有账户了？",
@@ -827,7 +849,8 @@
       "registerResend": "创建账户 - 重发激活邮件",
       "registerTwoFactor": "创建账户 - 两步验证",
       "setupLockScreen": "设置锁屏",
-      "verifyEmail": "创建账户 - 验证邮箱"
+      "verifyEmail": "创建账户 - 验证邮箱",
+      "manageAudit": "审计日志"
     },
     "upload": {
       "fileIsDirectory": "{name} 是一个文件夹"

@@ -213,6 +213,52 @@ where
         Ok(())
     }
 
+    /// Disable a user account: flag it with a timestamp so login refuses it,
+    /// and kill every live session so the lock is effective immediately.
+    pub(crate) async fn disable(&self, user_id: Uuid) -> AppResult<()> {
+        let user = users::Entity::find_by_id(user_id)
+            .one(self.repository.connection())
+            .await?
+            .ok_or_else(|| Error::NotFound("user_not_found".to_string()))?;
+
+        if user.disabled_at.is_none() {
+            users::Entity::update(users::ActiveModel {
+                id: ActiveValue::Set(user.id),
+                disabled_at: ActiveValue::Set(Some(Utc::now().timestamp())),
+                updated_at: ActiveValue::Set(Utc::now().timestamp()),
+                ..Default::default()
+            })
+            .exec(self.repository.connection())
+            .await?;
+        }
+
+        self.repository.sessions().kill_for(user_id).await?;
+
+        Ok(())
+    }
+
+    /// Re-enable a previously disabled user account. Disabling again is a
+    /// no-op, re-enabling an active account is a no-op too.
+    pub(crate) async fn enable(&self, user_id: Uuid) -> AppResult<()> {
+        let user = users::Entity::find_by_id(user_id)
+            .one(self.repository.connection())
+            .await?
+            .ok_or_else(|| Error::NotFound("user_not_found".to_string()))?;
+
+        if user.disabled_at.is_some() {
+            users::Entity::update(users::ActiveModel {
+                id: ActiveValue::Set(user.id),
+                disabled_at: ActiveValue::Set(None),
+                updated_at: ActiveValue::Set(Utc::now().timestamp()),
+                ..Default::default()
+            })
+            .exec(self.repository.connection())
+            .await?;
+        }
+
+        Ok(())
+    }
+
     /// Disable users two factor authentication
     pub(crate) async fn disable_tfa(&self, user_id: Uuid) -> AppResult<()> {
         let user = users::Entity::find_by_id(user_id)

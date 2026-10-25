@@ -39,10 +39,35 @@ pub(crate) async fn credentials(
     let provider = CredentialsProvider::new(&auth, data.into_inner());
 
     let authenticated = match provider.authenticate(&user_agent, &ip).await {
-        Ok(authenticated) => authenticated,
+        Ok(authenticated) => {
+            entity::audit_log::record(
+                &context.db,
+                Some(authenticated.user.id),
+                "login.success",
+                None,
+                Some(ip.clone()),
+                Some(user_agent.clone()),
+                None,
+            )
+            .await;
+            authenticated
+        }
         Err(e) => {
             if !is_two_factor_prompt(&e) {
                 crate::rate_limit::charge_failure(identity, &ip, now);
+
+                // A two-factor prompt has already proven the password, so it
+                // is neither a success nor a failure worth recording.
+                entity::audit_log::record(
+                    &context.db,
+                    None,
+                    "login.failure",
+                    identity.map(|i| format!("email:{i}")),
+                    Some(ip.clone()),
+                    Some(user_agent.clone()),
+                    Some(serde_json::json!({ "reason": e.to_string() }).to_string()),
+                )
+                .await;
             }
             return Err(e);
         }

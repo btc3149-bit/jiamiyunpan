@@ -245,9 +245,31 @@
       "tfaEnabled": "enabled",
       "tfaOff": "off",
       "title": "Users ({total})",
-      "unverified": "unverified"
+      "unverified": "unverified",
+      "actionDelete": "Delete",
+      "actionDisable": "Disable",
+      "actionEnable": "Enable",
+      "bulkConfirmTitle": "Confirm bulk action",
+      "bulkConfirmText": "Apply \"{action}\" to {count} selected user(s)? This cannot be undone for deletes.",
+      "bulkDelete": "Delete selected",
+      "bulkDisable": "Disable selected",
+      "bulkEnable": "Enable selected",
+      "bulkDone": "Bulk action completed",
+      "bulkFailed": "Bulk action partially failed",
+      "bulkSummary": "{success} succeeded, {failed} failed",
+      "disabled": "Disabled",
+      "selectedCount": "{count} selected"
     },
-    "withExpired": "With Expired"
+    "withExpired": "With Expired",
+    "audit": {
+      "title": "Audit Log ({total})",
+      "actionFilterPlaceholder": "Filter by action (e.g. login)",
+      "time": "Time",
+      "user": "User",
+      "action": "Action",
+      "target": "Target",
+      "empty": "No audit entries"
+    }
   },
   "auth": {
     "alreadyHaveAccount": "Already have an account?",
@@ -827,7 +849,8 @@
       "registerResend": "Create Account - Resend Activation Email",
       "registerTwoFactor": "Create Account - Two-Factor Authentication",
       "setupLockScreen": "Setup Lock Screen",
-      "verifyEmail": "Create Account - Verify Email"
+      "verifyEmail": "Create Account - Verify Email",
+      "manageAudit": "Manage Audit"
     },
     "upload": {
       "fileIsDirectory": "{name} is a folder"

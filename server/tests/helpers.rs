@@ -67,6 +67,7 @@ pub(crate) async fn seed_legacy_user<C: entity::ConnectionTrait>(
         updated_at: ActiveValue::Set(now),
         share_notifications_enabled: ActiveValue::Set(true),
         locale: ActiveValue::NotSet,
+        disabled_at: ActiveValue::NotSet,
     })
     .exec_without_returning(db)
     .await

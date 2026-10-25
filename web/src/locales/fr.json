@@ -245,9 +245,31 @@
       "tfaEnabled": "activée",
       "tfaOff": "désactivée",
       "title": "Utilisateurs ({total})",
-      "unverified": "non vérifié"
+      "unverified": "non vérifié",
+      "actionDelete": "Supprimer",
+      "actionDisable": "Désactiver",
+      "actionEnable": "Activer",
+      "bulkConfirmTitle": "Confirmer l'action groupée",
+      "bulkConfirmText": "Appliquer « {action} » à {count} utilisateur(s) sélectionné(s) ? La suppression est irréversible.",
+      "bulkDelete": "Supprimer la sélection",
+      "bulkDisable": "Désactiver la sélection",
+      "bulkEnable": "Activer la sélection",
+      "bulkDone": "Action groupée terminée",
+      "bulkFailed": "Action groupée partiellement échouée",
+      "bulkSummary": "{success} réussis, {failed} échoués",
+      "disabled": "Désactivé",
+      "selectedCount": "{count} sélectionné(s)"
     },
-    "withExpired": "Inclure les expirées"
+    "withExpired": "Inclure les expirées",
+    "audit": {
+      "title": "Journal d'audit ({total})",
+      "actionFilterPlaceholder": "Filtrer par action (ex. login)",
+      "time": "Heure",
+      "user": "Utilisateur",
+      "action": "Action",
+      "target": "Cible",
+      "empty": "Aucune entrée d'audit"
+    }
   },
   "auth": {
     "alreadyHaveAccount": "Vous avez déjà un compte ?",
@@ -827,7 +849,8 @@
       "registerResend": "Créer un compte - Renvoyer l’e-mail d’activation",
       "registerTwoFactor": "Créer un compte - Authentification à deux facteurs",
       "setupLockScreen": "Configurer l’écran de verrouillage",
-      "verifyEmail": "Créer un compte - Vérifier l’e-mail"
+      "verifyEmail": "Créer un compte - Vérifier l’e-mail",
+      "manageAudit": "Gérer l'audit"
     },
     "upload": {
       "fileIsDirectory": "Le fichier {name} est un dossier"

@@ -1832,6 +1832,7 @@ dependencies = [
  "cryptfns",
  "error",
  "fs",
+ "log",
  "num-traits",
  "sea-orm",
  "serde",

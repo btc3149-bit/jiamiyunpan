@@ -245,9 +245,31 @@
       "tfaEnabled": "uključen",
       "tfaOff": "isključen",
       "title": "Korisnici ({total})",
-      "unverified": "nepotvrđen"
+      "unverified": "nepotvrđen",
+      "actionDelete": "Izbriši",
+      "actionDisable": "Onemogući",
+      "actionEnable": "Omogući",
+      "bulkConfirmTitle": "Potvrdi skupnu radnju",
+      "bulkConfirmText": "Primijeni „{action}\" na {count} odabranih korisnika? Brisanje se ne može poništiti.",
+      "bulkDelete": "Izbriši odabrane",
+      "bulkDisable": "Onemogući odabrane",
+      "bulkEnable": "Omogući odabrane",
+      "bulkDone": "Skupna radnja dovršena",
+      "bulkFailed": "Skupna radnja djelomično nije uspjela",
+      "bulkSummary": "{success} uspješno, {failed} neuspješno",
+      "disabled": "Onemogućeno",
+      "selectedCount": "Odabrano {count}"
     },
-    "withExpired": "Uključi istekle"
+    "withExpired": "Uključi istekle",
+    "audit": {
+      "title": "Zapisnik revizije ({total})",
+      "actionFilterPlaceholder": "Filtriraj po radnji (npr. login)",
+      "time": "Vrijeme",
+      "user": "Korisnik",
+      "action": "Radnja",
+      "target": "Cilj",
+      "empty": "Nema zapisa revizije"
+    }
   },
   "auth": {
     "alreadyHaveAccount": "Već imaš račun?",
@@ -827,7 +849,8 @@
       "registerResend": "Kreiranje računa - Ponovno slanje aktivacijskog emaila",
       "registerTwoFactor": "Kreiranje računa - Dvofaktorska autentifikacija",
       "setupLockScreen": "Postavljanje zaključanog ekrana",
-      "verifyEmail": "Kreiranje računa - Potvrda emaila"
+      "verifyEmail": "Kreiranje računa - Potvrda emaila",
+      "manageAudit": "Upravljanje revizijom"
     },
     "upload": {
       "fileIsDirectory": "{name} je folder, a ne datoteka"

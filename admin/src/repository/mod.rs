@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 pub(crate) mod files;
 pub(crate) mod invitations;
 pub(crate) mod sessions;
@@ -28,6 +29,13 @@ where
 
     pub(crate) fn context(&self) -> &'ctx Context {
         self.context
+    }
+
+    pub(crate) fn audit<'repository>(&'ctx self) -> audit::AuditRepository<'repository, T>
+    where
+        Self: 'repository,
+    {
+        audit::AuditRepository::new(self)
     }
 
     pub(crate) fn files<'repository>(&'ctx self) -> files::FilesRepository<'repository, T>

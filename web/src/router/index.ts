@@ -167,6 +167,12 @@ const router = createRouter({
       meta: { title: 'nav.title.manageSettings' },
       component: () => import('../views/admin/SettingsView.vue')
     },
+    {
+      path: '/manage/audit',
+      name: 'manage-audit',
+      meta: { title: 'nav.title.manageAudit' },
+      component: () => import('../views/admin/AuditView.vue')
+    },
 
     /**
      * Auth routes

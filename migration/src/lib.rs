@@ -40,6 +40,8 @@ pub(crate) mod m20260824_000001_file_tokens_source;
 pub(crate) mod m20260828_000001_retokenize_search_index;
 pub(crate) mod m20261019_000001_create_trashed_files;
 pub(crate) mod m20261019_000002_alter_links_password_and_max_downloads;
+pub(crate) mod m20261019_000003_create_audit_logs;
+pub(crate) mod m20261019_000004_alter_users_disabled_at;
 
 #[cfg(test)]
 mod share_events_rebuild_test;
@@ -90,6 +92,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260828_000001_retokenize_search_index::Migration),
             Box::new(m20261019_000001_create_trashed_files::Migration),
             Box::new(m20261019_000002_alter_links_password_and_max_downloads::Migration),
+            Box::new(m20261019_000003_create_audit_logs::Migration),
+            Box::new(m20261019_000004_alter_users_disabled_at::Migration),
         ]
     }
 }

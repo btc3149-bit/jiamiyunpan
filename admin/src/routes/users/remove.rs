@@ -17,6 +17,7 @@ pub(crate) async fn remove(
 
     let id = util::actix::path_var::<Uuid>(&req, "id")?;
     staff.forbidden_self(id)?;
+    let (user_agent, ip) = util::actix::extract_ip_ua(&req);
 
     let context = context.into_inner();
 
@@ -24,6 +25,17 @@ pub(crate) async fn remove(
         .users()
         .delete(id)
         .await?;
+
+    entity::audit_log::record(
+        &context.db,
+        Some(staff.claims.sub),
+        "admin.user.delete",
+        Some(format!("user:{}", id)),
+        Some(ip),
+        Some(user_agent),
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::NoContent().finish())
 }

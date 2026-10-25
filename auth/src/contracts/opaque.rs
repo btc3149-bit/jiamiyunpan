@@ -301,6 +301,12 @@ where
 
         let mut user = self.get_by_id(session.user_id).await?;
 
+        // A disabled account has proven nothing wrong with its password here —
+        // it is simply not allowed in until an admin re-enables it.
+        if user.disabled_at.is_some() {
+            return Err(Error::Forbidden("account_disabled".to_string()));
+        }
+
         // The password proof succeeded above, so a missing code is not a failed
         // authentication — it is the point where a two-step client is told to
         // ask for one. Kept distinct from a *wrong* code, which is a real guess

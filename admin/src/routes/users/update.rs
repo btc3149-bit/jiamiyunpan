@@ -25,6 +25,7 @@ pub(crate) async fn update(
 
     let mut update = update.into_inner();
     let id = util::actix::path_var::<Uuid>(&req, "id")?;
+    let (user_agent, ip) = util::actix::extract_ip_ua(&req);
 
     // Admins can update all of their attributes
     // except for their role so we override whatever with current one
@@ -32,12 +33,29 @@ pub(crate) async fn update(
         update.role = staff.claims.role;
     }
 
+    let metadata = serde_json::json!({
+        "role": update.role,
+        "quota": update.quota,
+    })
+    .to_string();
+
     let context = context.into_inner();
 
     let user = Repository::new(&context, &context.db)
         .users()
         .update(id, update)
         .await?;
+
+    entity::audit_log::record(
+        &context.db,
+        Some(staff.claims.sub),
+        "admin.user.update",
+        Some(format!("user:{}", id)),
+        Some(ip),
+        Some(user_agent),
+        Some(metadata),
+    )
+    .await;
 
     let stats = Repository::new(&context, &context.db)
         .files()

@@ -132,10 +132,35 @@ pub(crate) async fn login_finish(
         .opaque_login_finish(data.login_id, &data.credential_finalization, data.token, &user_agent, &ip)
         .await
     {
-        Ok(authenticated) => authenticated,
+        Ok(authenticated) => {
+            entity::audit_log::record(
+                &context.db,
+                Some(authenticated.user.id),
+                "login.success",
+                None,
+                Some(ip.clone()),
+                Some(user_agent.clone()),
+                None,
+            )
+            .await;
+            authenticated
+        }
         Err(e) => {
             if !is_two_factor_prompt(&e) {
                 crate::rate_limit::charge_failure(None, &ip, now);
+
+                // The wire carries only a `login_id`, never the email, so a
+                // failed OPAQUE finish has no identity to record.
+                entity::audit_log::record(
+                    &context.db,
+                    None,
+                    "login.failure",
+                    None,
+                    Some(ip.clone()),
+                    Some(user_agent.clone()),
+                    Some(serde_json::json!({ "reason": e.to_string() }).to_string()),
+                )
+                .await;
             }
             return Err(e);
         }
