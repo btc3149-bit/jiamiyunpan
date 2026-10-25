@@ -14,6 +14,7 @@ import { useI18n } from 'vue-i18n'
 import type { ErrorResponse } from '!/api'
 import type { Credentials } from 'types'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import BrandLogo from '@/components/ui/BrandLogo.vue'
 import { humanizeError } from '!/index'
 
 const login = store()
@@ -131,6 +132,9 @@ init()
   <LayoutGuest>
     <SectionFullScreen v-slot="{ cardClass }">
       <CardBox :class="cardClass">
+        <div class="flex justify-center mb-6">
+          <BrandLogo :size="48" />
+        </div>
         <template v-if="pending && tokenConfig">
           <h1 class="text-2xl text-brownish-700 dark:text-white">
             {{ $t('auth.login.twoFactorTitle') }}

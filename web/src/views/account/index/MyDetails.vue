@@ -148,7 +148,7 @@ async function copyToClipboard(value: string, field: string) {
         <div class="flex items-start gap-3">
           <span class="w-28 shrink-0 text-xs font-medium text-brownish-400 dark:text-brownish-50 mt-0.5">{{ $t('account.details.publicKey') }}</span>
           <div class="flex-1 min-w-0 flex items-start gap-2">
-            <code class="flex-1 font-mono text-xs break-all text-brownish-400 dark:text-brownish-50 leading-relaxed bg-paper-50 dark:bg-brownish-900/50 px-2.5 py-1.5 rounded-lg">{{ user.pubkey }}</code>
+            <code class="flex-1 font-mono text-xs break-all text-brownish-400 dark:text-white leading-relaxed bg-paper-50 dark:bg-brownish-900/50 px-2.5 py-1.5 rounded-lg">{{ user.pubkey }}</code>
             <button
               @click="copyToClipboard(user.pubkey, 'pubkey')"
               class="shrink-0 mt-1 p-1 rounded-md text-brownish-400 dark:text-brownish-50 hover:text-brownish-900 dark:hover:text-white hover:bg-paper-100 dark:hover:bg-brownish-700 transition-colors"
@@ -163,7 +163,7 @@ async function copyToClipboard(value: string, field: string) {
         <div class="flex items-start gap-3">
           <span class="w-28 shrink-0 text-xs font-medium text-brownish-400 dark:text-brownish-50 mt-0.5">{{ $t('account.details.fingerprint') }}</span>
           <div class="flex-1 min-w-0 flex items-start gap-2">
-            <code class="flex-1 font-mono text-xs break-all text-brownish-400 dark:text-brownish-50 bg-paper-50 dark:bg-brownish-900/50 px-2.5 py-1.5 rounded-lg">{{ user.fingerprint }}</code>
+            <code class="flex-1 font-mono text-xs break-all text-brownish-400 dark:text-white bg-paper-50 dark:bg-brownish-900/50 px-2.5 py-1.5 rounded-lg">{{ user.fingerprint }}</code>
             <button
               @click="copyToClipboard(user.fingerprint, 'fingerprint')"
               class="shrink-0 mt-1 p-1 rounded-md text-brownish-400 dark:text-brownish-50 hover:text-brownish-900 dark:hover:text-white hover:bg-paper-100 dark:hover:bg-brownish-700 transition-colors"

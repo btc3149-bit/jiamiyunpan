@@ -474,7 +474,7 @@ function onPeopleCancel(): void {
           </p>
           <p
             v-else-if="userGrants.length === 0"
-            class="text-sm text-brownish-300 dark:text-brownish-50 px-3 py-3 rounded-lg bg-paper-50 dark:bg-brownish-800/40"
+            class="text-sm text-brownish-300 dark:text-white px-3 py-3 rounded-lg bg-paper-50 dark:bg-brownish-800/40"
             data-testid="sharing-modal-people-empty"
           >
             {{ $t('shares.modal.peopleEmpty') }}

@@ -365,7 +365,7 @@ const drop = (e: DragEvent) => {
       <TruncatedSpan :text="prettyMime(props.file.mime)" />
     </div>
 
-    <div :class="sizes.modifiedAt" :title="fileModifiedAt">
+    <div :class="sizes.modifiedAt" :title="fileModifiedAt" class="text-brownish-400 dark:text-brownish-50">
       <TruncatedSpan :text="fileModifiedAt" />
     </div>
 

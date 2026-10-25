@@ -9,6 +9,7 @@ import AsideMenuList from '@/components/ui/AsideMenuList.vue'
 import AsideMenuItem from '@/components/ui/AsideMenuItem.vue'
 import AsideFileTree from '@/components/ui/AsideFileTree.vue'
 import BaseIcon from '@/components/ui/BaseIcon.vue'
+import BrandLogo from '@/components/ui/BrandLogo.vue'
 import type { AsideMenuItemType } from '@/menuAside'
 import { useRouter } from 'vue-router'
 import StatsLi from '../files/StatsLi.vue'
@@ -108,8 +109,9 @@ const logoutAction = async () => {
         :class="styleStore.asideBrandStyle"
         class="flex flex-row h-14 items-center justify-between dark:bg-brownish-900"
       >
-        <div class="text-center flex-1 lg:text-left lg:pl-6 xl:text-center xl:pl-0">
-          <b class="font-black">
+        <div class="flex flex-1 items-center justify-center gap-2 lg:justify-start lg:pl-6 xl:justify-center xl:pl-0">
+          <BrandLogo :size="24" class="shrink-0" />
+          <b class="font-bold">
             {{ name }} <span class="text-xs">{{ version }}</span>
           </b>
         </div>

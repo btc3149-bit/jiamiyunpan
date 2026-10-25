@@ -101,7 +101,7 @@ const copy = () => {
   <div :class="wrapClass">
     <div class="w-full block">
       <div class="float-left" :class="{ 'w-1/2': allowCopy }" v-if="label">
-        <label :for="name"> {{ label }} </label>
+        <label :for="name" class="block mb-1 text-sm font-medium"> {{ label }} </label>
       </div>
       <div class="float-right w-1/2 mb-2" v-if="allowCopy">
         <button
@@ -156,7 +156,7 @@ const copy = () => {
 
     <ErrorMessage
       :name="name"
-      class="block text-sm text-redish-700 dark:text-redish-100 ml-2 mb-[-1.25rem]"
+      class="block text-sm text-redish-700 dark:text-redish-100 mt-1"
     />
   </div>
 </template>

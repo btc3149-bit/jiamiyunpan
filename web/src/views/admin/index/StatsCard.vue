@@ -56,7 +56,7 @@ onMounted(refresh)
               :style="{ width: usagePercent + '%' }"
             />
           </div>
-          <p class="text-xs text-brownish-400 dark:text-brownish-50 mt-1.5">{{ $t('admin.stats.capacityUsed', { percent: usagePercent }) }}</p>
+          <p class="text-xs text-brownish-400 dark:text-white mt-1.5">{{ $t('admin.stats.capacityUsed', { percent: usagePercent }) }}</p>
         </div>
 
         <!-- Breakdown by type -->

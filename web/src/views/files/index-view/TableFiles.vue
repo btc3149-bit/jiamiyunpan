@@ -298,7 +298,11 @@ const sizes = {
       @click="() => emits('move-all')"
     />
 
-    <span class="p-1" v-if="showMoveAll && singleSelected">|</span>
+    <span
+      class="mx-1 h-5 w-px self-center bg-brownish-200 dark:bg-brownish-700"
+      aria-hidden="true"
+      v-if="showMoveAll && singleSelected"
+    ></span>
 
     <BaseButton
       :title="$t('files.browser.renameTitle')"
