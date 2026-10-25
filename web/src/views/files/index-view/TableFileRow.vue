@@ -57,6 +57,7 @@ const emits = defineEmits<{
   (event: 'leave', file: AppFile): void
   (event: 'select-one', value: boolean, file: AppFile): void
   (event: 'select-range', file: AppFile): void
+  (event: 'context-menu', file: AppFile, event: MouseEvent): void
   (event: 'upload-many', files: FileList, dirId?: string): void
 }>()
 
@@ -228,6 +229,16 @@ const singleClick = () => {
   selectOne(!checked.value)
 }
 
+/**
+ * Right-click opens the shared context menu with the same action set as
+ * the row dropdown. The synthetic "Shared with me" root has no real id,
+ * so like the checkbox and dropdown it gets no context menu either.
+ */
+const onContextMenu = (event: MouseEvent) => {
+  if (isSyntheticRoot.value || !props.file.id) return
+  emits('context-menu', props.file, event)
+}
+
 const dragend = (e: DragEvent) => {
   if (props.file.mime !== 'dir') {
     return
@@ -272,6 +283,7 @@ const drop = (e: DragEvent) => {
 
 <template>
   <div
+    @contextmenu.prevent="onContextMenu"
     @dragenter="dragover"
     @dragleave="dragend"
     @dragend="dragend"

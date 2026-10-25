@@ -653,6 +653,11 @@
       "spreadsheet": "Feuille de calcul",
       "text": "Texte",
       "video": "Vidéo"
+    },
+    "viewMode": {
+      "switch": "Changer de mode d'affichage",
+      "table": "Vue en tableau",
+      "grid": "Vue en grille"
     }
   },
   "help": {

@@ -653,6 +653,11 @@
       "spreadsheet": "Tablica",
       "text": "Tekst",
       "video": "Video"
+    },
+    "viewMode": {
+      "switch": "Promijeni način prikaza",
+      "table": "Tablični prikaz",
+      "grid": "Rešetkasti prikaz"
     }
   },
   "help": {

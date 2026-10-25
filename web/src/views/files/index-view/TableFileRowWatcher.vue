@@ -33,6 +33,7 @@ const emits = defineEmits<{
   (event: 'leave', file: AppFile): void
   (event: 'select-one', value: boolean, file: AppFile): void
   (event: 'select-range', file: AppFile): void
+  (event: 'context-menu', file: AppFile, event: MouseEvent): void
   (event: 'upload-many', files: FileList, dirId?: string): void
 }>()
 
@@ -94,6 +95,7 @@ onUnmounted(() => {
       @leave="(f: AppFile) => emits('leave', f)"
       @select-one="(v: boolean, f: AppFile) => emits('select-one', v, f)"
       @select-range="(f: AppFile) => emits('select-range', f)"
+      @context-menu="(f: AppFile, e: MouseEvent) => emits('context-menu', f, e)"
       @upload-many="(f: FileList, d?: string) => emits('upload-many', f, d)"
     />
   </Suspense>

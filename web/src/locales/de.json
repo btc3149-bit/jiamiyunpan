@@ -653,6 +653,11 @@
       "spreadsheet": "Tabelle",
       "text": "Text",
       "video": "Video"
+    },
+    "viewMode": {
+      "switch": "Ansichtsmodus wechseln",
+      "table": "Tabellenansicht",
+      "grid": "Rasteransicht"
     }
   },
   "help": {

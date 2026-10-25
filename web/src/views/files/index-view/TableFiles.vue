@@ -15,12 +15,16 @@ import {
 import { useCapability } from '@/composables/useCapability'
 import TableCheckboxCell from '@/components/ui/TableCheckboxCell.vue'
 import SortableName from '@/components/ui/SortableName.vue'
+import FileContextMenu from '@/components/files/browser/FileContextMenu.vue'
+import ViewModeToggle from '@/components/files/browser/ViewModeToggle.vue'
+import GridFiles from './GridFiles.vue'
 import TableFileRowWatcher from './TableFileRowWatcher.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { computed, ref, watch } from 'vue'
 import type { AppFile } from 'types'
 import { isPreviewable, isMarkdownFile } from '!/preview'
 import { SHARED_WITH_ME_DIR_ID, canWriteToShared } from '!/storage'
+import { useViewMode } from './useViewMode'
 
 const props = defineProps<{
   selected: AppFile[]
@@ -58,6 +62,7 @@ const emits = defineEmits<{
   (event: 'leave', file: AppFile): void
   (event: 'select-all', files: AppFile[], fileId: string | null | undefined): void
   (event: 'select-one', select: boolean, file: AppFile): void
+  (event: 'context-menu', file: AppFile, event: MouseEvent): void
   (event: 'set-sort-simple', value: string): void
   (event: 'upload-many', files: FileList, dirId?: string): void
   (event: 'browse-folder'): void
@@ -66,6 +71,25 @@ const emits = defineEmits<{
 
 const checked = ref(false)
 const isDropZone = ref(false)
+
+/**
+ * Table vs grid rendering. The choice lives in a module-level ref backed
+ * by localStorage (`files.view-mode`), so it survives reloads and is
+ * shared by every surface that renders this listing.
+ */
+const { mode } = useViewMode()
+
+/**
+ * One shared context-menu instance for the whole listing. Rows and grid
+ * cards report right-clicks through `context-menu`; opening it here (a
+ * teleport to body) keeps a single floating panel instead of one per row.
+ * The forwarded events are exactly the row-dropdown set.
+ */
+const contextMenu = ref<InstanceType<typeof FileContextMenu> | null>(null)
+
+const openContextMenu = (file: AppFile, event: MouseEvent) => {
+  contextMenu.value?.open(event, file)
+}
 
 const dirId = computed<string | undefined>(() => {
   if (props.dir) {
@@ -397,6 +421,8 @@ const sizes = {
       @click="emits('browse-folder')"
       v-if="!checkedRows.length && !isSharedWithMeRoot && canCreateDirHere"
     />
+
+    <ViewModeToggle v-model="mode" class="ml-auto" />
   </div>
 
   <div
@@ -410,7 +436,13 @@ const sizes = {
     @dragover="dragover"
     @drop="drop"
   >
-    <div class="w-full flex rounded-t-lg bg-paper-100 dark:bg-brownish-950 border-b border-paper-300 dark:border-brownish-700/40">
+    <!-- Sortable column headers are a table-mode affordance; grid cards
+         carry their own metadata so the header row only renders for the
+         table layout. -->
+    <div
+      v-if="mode !== 'grid'"
+      class="w-full flex rounded-t-lg bg-paper-100 dark:bg-brownish-950 border-b border-paper-300 dark:border-brownish-700/40"
+    >
       <div :class="sizes.checkbox">
         <TableCheckboxCell v-model="checked" v-if="!props.hideCheckbox" :label="$t('common.selectAll')" />
       </div>
@@ -512,6 +544,28 @@ const sizes = {
         {{ $t('files.browser.emptyFolderHint') }}
       </span>
     </div>
+    <GridFiles
+      v-else-if="mode === 'grid'"
+      :items="props.items"
+      :checkedIds="checkedIds"
+      :hideDelete="props.hideDelete"
+      :share="props.share"
+      :hideCheckbox="props.hideCheckbox"
+      :searchedFileId="props.searchedFileId"
+      @actions="(f: AppFile) => emits('actions', f)"
+      @deselect-all="emits('deselect-all')"
+      @details="(f: AppFile) => emits('details', f)"
+      @download="(f: AppFile) => emits('download', f)"
+      @remove="(f: AppFile) => emits('remove', f)"
+      @rename="(f: AppFile) => emits('rename', f)"
+      @sharing="(f: AppFile) => emits('sharing', f)"
+      @fork="(f: AppFile) => emits('fork', f)"
+      @leave="(f: AppFile) => emits('leave', f)"
+      @select-one="selectOneAt"
+      @select-range="selectRange"
+      @context-menu="openContextMenu"
+      @upload-many="(f: FileList, d?: string) => emits('upload-many', f, d)"
+    />
     <div v-else ref="listEl" class="flex flex-col rounded-b-lg" @keydown="onListKeydown">
       <template v-for="file in props.items" :key="file.id">
         <TableFileRowWatcher
@@ -533,9 +587,23 @@ const sizes = {
           @leave="(f: AppFile) => emits('leave', f)"
           @select-one="selectOneAt"
           @select-range="selectRange"
+          @context-menu="openContextMenu"
           @upload-many="(f: FileList, d?: string) => emits('upload-many', f, d)"
         />
       </template>
     </div>
+
+    <FileContextMenu
+      ref="contextMenu"
+      :hide-delete="props.hideDelete"
+      :share="props.share"
+      @details="(f: AppFile) => emits('details', f)"
+      @download="(f: AppFile) => emits('download', f)"
+      @remove="(f: AppFile) => emits('remove', f)"
+      @rename="(f: AppFile) => emits('rename', f)"
+      @sharing="(f: AppFile) => emits('sharing', f)"
+      @fork="(f: AppFile) => emits('fork', f)"
+      @leave="(f: AppFile) => emits('leave', f)"
+    />
   </div>
 </template>

@@ -653,6 +653,11 @@
       "spreadsheet": "表格",
       "text": "文本",
       "video": "视频"
+    },
+    "viewMode": {
+      "switch": "切换视图模式",
+      "table": "表格视图",
+      "grid": "网格视图"
     }
   },
   "help": {

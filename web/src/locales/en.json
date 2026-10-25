@@ -653,6 +653,11 @@
       "spreadsheet": "Spreadsheet",
       "text": "Text",
       "video": "Video"
+    },
+    "viewMode": {
+      "switch": "Switch view mode",
+      "table": "Table view",
+      "grid": "Grid view"
     }
   },
   "help": {
