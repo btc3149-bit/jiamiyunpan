@@ -148,7 +148,7 @@ export function isMarkdownFile(item: AppFile): boolean {
   return (
     item.mime === 'text/markdown' ||
     item.mime === 'text/x-markdown' ||
-    item.name.toLowerCase().endsWith('.md')
+    (item.name?.toLowerCase().endsWith('.md') ?? false)
   )
 }
 
@@ -321,7 +321,7 @@ export abstract class Preview {
     return (
       this.mime === 'text/markdown' ||
       this.mime === 'text/x-markdown' ||
-      this.name.toLowerCase().endsWith('.md')
+      (this.name?.toLowerCase().endsWith('.md') ?? false)
     )
   }
 
