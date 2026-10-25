@@ -52,6 +52,7 @@
     "libheif-js": "^1.19.8",
     "localforage": "^1.10.0",
     "lscache": "^1.3.2",
+    "mammoth": "1.13.0",
     "pinia": "^2.0.32",
     "qrcode.vue": "^3.3.4",
     "refractor": "^5.0.0",

@@ -17,6 +17,9 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { Preview } from '!/preview'
 import PreviewPdf from './PreviewPdf.vue'
 import PreviewMarkdown from './PreviewMarkdown.vue'
+import PreviewText from './PreviewText.vue'
+import PreviewAudio from './PreviewAudio.vue'
+import PreviewDocx from './PreviewDocx.vue'
 
 const props = defineProps<{
   modelValue: Preview
@@ -132,7 +135,7 @@ onUnmounted(() => {
       v-if="preview"
       class="dark fixed top-0 left-0 flex flex-col items-center justify-center w-full h-full bg-brownish-950 text-brownish-100 pt-12"
       :class="{
-        'pb-20': previewType !== 'pdf' && previewType !== 'markdown'
+        'pb-20': previewType !== 'pdf' && previewType !== 'markdown' && previewType !== 'text' && previewType !== 'docx'
       }"
     >
       <slot />
@@ -215,6 +218,9 @@ onUnmounted(() => {
       <PreviewPdf v-else-if="previewType === 'pdf'" v-model="preview" />
       <PreviewVideo v-else-if="previewType === 'video'" v-model="preview" />
       <PreviewMarkdown v-else-if="previewType === 'markdown'" ref="markdownRef" v-model="preview" readonly />
+      <PreviewText v-else-if="previewType === 'text'" v-model="preview" />
+      <PreviewAudio v-else-if="previewType === 'audio'" v-model="preview" />
+      <PreviewDocx v-else-if="previewType === 'docx'" v-model="preview" />
 
       <div class="flex flex-col" v-else>
         <div class="mb-4 text-center">

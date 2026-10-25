@@ -3,6 +3,94 @@ type NonFunctionPropertyNames<T> = { [K in keyof T]: T[K] extends Function ? nev
 export type ConstructPreview<T> = Pick<T, NonFunctionPropertyNames<T>>
 
 /**
+ * Upper bound on how much of a text file the preview renders. Anything
+ * beyond this is decoded from the leading slice and announced as truncated,
+ * so a stray 200 MB log file can't freeze the tab.
+ */
+export const TEXT_PREVIEW_MAX_BYTES = 1024 * 1024
+
+/**
+ * Extensions we are willing to render as text even when the stored mime is
+ * the generic application/octet-stream. `.md` is intentionally absent —
+ * markdown files route to the markdown preview, not the plain-text one.
+ */
+const TEXT_EXTENSIONS = [
+  'txt', 'log', 'json', 'xml', 'yml', 'yaml', 'csv', 'tsv', 'ini', 'cfg', 'conf',
+  'toml', 'env', 'properties', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'py', 'rs', 'go', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb',
+  'php', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'sql', 'html', 'htm', 'css',
+  'scss', 'less', 'vue', 'svelte', 'lua', 'pl', 'r', 'dockerfile',
+  'gitignore', 'makefile', 'editorconfig'
+]
+
+/**
+ * application/* mimes that carry plain-text payloads (servers rarely label
+ * these text/*, but the content decodes exactly the same way).
+ */
+const TEXT_APPLICATION_MIMES = [
+  'application/json',
+  'application/xml',
+  'application/xhtml+xml',
+  'application/javascript',
+  'application/x-javascript',
+  'application/x-yaml',
+  'application/yaml',
+  'application/toml',
+  'application/x-sh',
+  'application/sql'
+]
+
+export function getTextExtension(name: string | undefined): string {
+  if (!name) return ''
+  const base = name.toLowerCase().split('/').pop() ?? ''
+  const dot = base.lastIndexOf('.')
+  // Dotfiles like .gitignore/.env carry their "extension" in the basename;
+  // extension-less names (e.g. "Makefile") count as their own extension.
+  if (dot <= 0) return dot === 0 ? base.slice(1) : base
+  return base.slice(dot + 1)
+}
+
+/**
+ * The text half of the check, split from [[hasPreviewableContent]] so both
+ * the raw-mime path and the extension-fallback path stay testable.
+ */
+export function isTextMime(mime: string): boolean {
+  return mime.startsWith('text/') || TEXT_APPLICATION_MIMES.includes(mime)
+}
+
+export function isTextFile(item: { mime: string; name?: string }): boolean {
+  if (isTextMime(item.mime)) return true
+  return item.mime === 'application/octet-stream' && TEXT_EXTENSIONS.includes(getTextExtension(item.name))
+}
+
+export function isAudioMime(mime: string): boolean {
+  return mime.startsWith('audio/')
+}
+
+export function isDocxMime(mime: string): boolean {
+  return (
+    mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  )
+}
+
+/**
+ * Decode decrypted bytes for the text preview, never reading past
+ * [[TEXT_PREVIEW_MAX_BYTES]] so huge files render their head instead of
+ * their entirety. Invalid UTF-8 degrades to replacement characters rather
+ * than throwing, and the cut point may split a multibyte rune — harmless
+ * for a display-only preview.
+ */
+export function decodeTextPreview(
+  data: Uint8Array,
+  maxBytes = TEXT_PREVIEW_MAX_BYTES
+): { text: string; truncated: boolean } {
+  const truncated = data.length > maxBytes
+  const slice = truncated ? data.slice(0, maxBytes) : data
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(slice)
+  return { text, truncated }
+}
+
+/**
  * Check if the file or link is previewable
  */
 export function isPreviewable(item: AppFile | AppLink): boolean {
@@ -33,6 +121,7 @@ function isFilePreviewable(item: AppFile): boolean {
 function hasPreviewableContent(item: {
   size?: number
   mime: string
+  name?: string
   thumbnail?: string
   has_thumbnail?: boolean
 }): boolean {
@@ -44,6 +133,9 @@ function hasPreviewableContent(item: {
       item.mime === 'application/pdf' ||
       item.mime === 'text/markdown' ||
       item.mime === 'text/x-markdown' ||
+      isTextFile(item) ||
+      isAudioMime(item.mime) ||
+      isDocxMime(item.mime) ||
       item.mime.startsWith('image/') ||
       item.mime.startsWith('video/'))
   )
@@ -69,7 +161,10 @@ function isLinkPreviewable(item: AppLink): boolean {
     item.file_size > 0 &&
     (item.thumbnail !== undefined ||
       item.has_thumbnail === true ||
-      item.file_mime === 'application/pdf')
+      item.file_mime === 'application/pdf' ||
+      isTextFile({ mime: item.file_mime, name: item.name }) ||
+      isAudioMime(item.file_mime) ||
+      isDocxMime(item.file_mime))
   )
 }
 
@@ -180,11 +275,14 @@ export abstract class Preview {
   /**
    * Easily match the preview type
    */
-  public previewType(): 'image' | 'pdf' | 'video' | 'markdown' | null {
+  public previewType(): 'image' | 'pdf' | 'video' | 'markdown' | 'text' | 'audio' | 'docx' | null {
     if (this.isImage()) return 'image'
     if (this.isPdf()) return 'pdf'
     if (this.isVideo()) return 'video'
     if (this.isMarkdown()) return 'markdown'
+    if (this.isText()) return 'text'
+    if (this.isAudio()) return 'audio'
+    if (this.isDocx()) return 'docx'
     return null
   }
 
@@ -225,5 +323,28 @@ export abstract class Preview {
       this.mime === 'text/x-markdown' ||
       this.name.toLowerCase().endsWith('.md')
     )
+  }
+
+  /**
+   * Lets us know if the preview renders as plain text. Markdown wins over
+   * this branch — [[previewType]] checks it first — so .md files keep the
+   * rich editor instead of falling into the raw-text viewer.
+   */
+  public isText(): boolean {
+    return this.is() && isTextFile({ mime: this.mime, name: this.name })
+  }
+
+  /**
+   * Lets us know if the preview is an audio file
+   */
+  public isAudio(): boolean {
+    return this.is() && isAudioMime(this.mime)
+  }
+
+  /**
+   * Lets us know if the preview is a Word document (docx)
+   */
+  public isDocx(): boolean {
+    return this.is() && isDocxMime(this.mime)
   }
 }
